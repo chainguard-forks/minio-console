@@ -61,4 +61,4 @@ COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
 EXPOSE 9090
 
 ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
-CMD ["console"]
+CMD ["console", "server"]
