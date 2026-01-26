@@ -5,16 +5,7 @@ WORKDIR /build
 
 COPY --from=xx / /
 
-# Install curl
-RUN apk add -U --no-cache ca-certificates && \
-    apk add -U --no-cache curl && \
-    apk add -U --no-cache bash
-
-COPY dockerscripts/download-static-curl.sh /tmp/download-static-curl
-ARG TARGETARCH
-RUN chmod +x /tmp/download-static-curl && \
-    /tmp/download-static-curl && \
-    rm /tmp/download-static-curl
+RUN apk add -U --no-cache bash
 
 COPY go.* .
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -52,7 +43,6 @@ RUN chmod -R 777 /usr/bin
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /go/bin/console /usr/bin/
-COPY --from=build /go/bin/curl /usr/bin/
 
 COPY CREDITS /licenses/CREDITS
 COPY LICENSE /licenses/LICENSE
