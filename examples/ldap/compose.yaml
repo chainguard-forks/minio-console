@@ -1,0 +1,46 @@
+services:
+  minio:
+    image: cgr.dev/chainguard/minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      
+      MINIO_IDENTITY_LDAP_SERVER_ADDR: lldap:3890
+      MINIO_IDENTITY_LDAP_SERVER_INSECURE: "on"
+
+      MINIO_IDENTITY_LDAP_LOOKUP_BIND_DN: uid=minioadmin,ou=people,dc=example,dc=com
+      MINIO_IDENTITY_LDAP_LOOKUP_BIND_PASSWORD: minioadmin
+      MINIO_IDENTITY_LDAP_USER_DN_SEARCH_BASE_DN: "ou=people,dc=example,dc=com"
+      MINIO_IDENTITY_LDAP_USER_DN_SEARCH_FILTER: "(uid=%s)"
+      MINIO_IDENTITY_LDAP_GROUP_SEARCH_BASE_DN: "ou=groups,dc=example,dc=com"
+      MINIO_IDENTITY_LDAP_GROUP_SEARCH_FILTER: "(member=%d)"
+    ports:
+      - 127.0.0.1:9000:9000
+    command: ["server", "/data"]
+    volumes:
+      - minio-data:/data
+  console:
+    image: ghcr.io/huncrys/minio-console:latest
+    build: ../..
+    environment:
+      CONSOLE_MINIO_REGION: eu-central-1
+      CONSOLE_MINIO_SERVER: http://minio:9000
+      CONSOLE_LDAP_ENABLED: "on"
+    ports:
+      - 127.0.0.1:9090:9090
+  lldap:
+    image: lldap/lldap:stable
+    ports:
+      - 127.0.0.1:17170:17170
+    volumes:
+      - lldap-data:/data
+    environment:
+      LLDAP_JWT_SECRET: someVerySecretJwtSecret
+      LLDAP_KEY_SEED: someVerySecureKeySeed
+      LLDAP_LDAP_BASE_DN: dc=example,dc=com
+      LLDAP_LDAP_USER_PASS: lldapadmin
+
+
+volumes:
+  minio-data:
+  lldap-data:
