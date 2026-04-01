@@ -1,0 +1,26 @@
+linters:
+  disable-all: true
+  enable:
+    - typecheck
+    - goimports
+    - govet
+    - revive
+    - ineffassign
+    - gosimple
+    - unused
+    - prealloc
+    - unconvert
+    - gofumpt
+    - misspell
+    - dupword
+    - godot
+
+linters-settings:
+  misspell:
+    locale: US
+
+issues:
+  exclude-use-default: false
+
+service:
+  golangci-lint-version: 1.48.0 # use the fixed version to not introduce new linters unexpectedly
