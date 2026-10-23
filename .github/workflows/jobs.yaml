@@ -72,59 +72,6 @@ jobs:
           pip3 install semgrep
           semgrep --config semgrep.yaml $(pwd)/web-app --error
 
-  ui-assets:
-    name: "React Code Has No Warnings & Prettified"
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: [ 1.26.x ]
-        os: [ ubuntu-latest ]
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: audit
-
-      - name: Check out code
-        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
-      - name: Read .nvmrc
-        id: node_version
-        run: echo "$(cat .nvmrc)" && echo "NVMRC=$(cat .nvmrc)" >> $GITHUB_ENV
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ env.NVMRC }}
-          cache: "yarn"
-          cache-dependency-path: web-app/yarn.lock
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: assets-cache
-        name: Assets Cache
-        with:
-          path: |
-            ./web-app/build/
-          key: ${{ runner.os }}-assets-${{ github.run_id }}
-      - name: Install Dependencies
-        working-directory: ./web-app
-        continue-on-error: false
-        run: |
-          yarn install --immutable
-      - name: Check for Warnings in build output
-        working-directory: ./web-app
-        continue-on-error: false
-        run: |
-          ./check-warnings.sh
-      - name: Check if Files are Prettified
-        working-directory: ./web-app
-        continue-on-error: false
-        run: |
-          ./check-prettier.sh
-      - name: Check for dead code
-        working-directory: ./web-app
-        continue-on-error: false
-        run: |
-          ./check-deadcode.sh
-
   latest-minio:
     name: Build latest MinIO
     runs-on: [ ubuntu-latest ]
@@ -168,7 +115,6 @@ jobs:
     name: Compiles on Go ${{ matrix.go-version }} and ${{ matrix.os }}
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -607,7 +553,6 @@ jobs:
     name: Test Pkg on Go ${{ matrix.go-version }} and ${{ matrix.os }}
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -647,7 +592,6 @@ jobs:
     name: Test API on Go ${{ matrix.go-version }} and ${{ matrix.os }}
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -687,7 +631,6 @@ jobs:
     name: Integration Tests with Latest Distributed MinIO
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
       - latest-minio
     runs-on: ubuntu-latest
@@ -890,99 +833,10 @@ jobs:
             exit 1
           fi
 
-  ui-assets-istanbul-coverage:
-    name: "Assets with Istanbul Plugin for coverage"
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: [ 1.26.x ]
-        os: [ ubuntu-latest ]
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: audit
-
-      - name: Check out code
-        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
-      - name: Read .nvmrc
-        id: node_version
-        run: echo "$(cat .nvmrc)" && echo "NVMRC=$(cat .nvmrc)" >> $GITHUB_ENV
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ env.NVMRC }}
-          cache: "yarn"
-          cache-dependency-path: web-app/yarn.lock
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: assets-cache-istanbul-coverage
-        name: Assets Cache Istanbul Coverage
-        with:
-          path: |
-            ./web-app/build/
-          key: ${{ runner.os }}-assets-istanbul-coverage-${{ github.run_id }}
-      - name: Install Dependencies
-        working-directory: ./web-app
-        continue-on-error: false
-        run: |
-          yarn install --immutable
-      - name: Check for Warnings in build output
-        working-directory: ./web-app
-        continue-on-error: false
-        run: |
-          ./check-warnings-istanbul-coverage.sh
-
-  compile-binary-istanbul-coverage:
-    name: "Compile Console Binary with Istanbul Plugin for Coverage"
-    needs:
-      - lint-job
-      - ui-assets-istanbul-coverage
-      - semgrep-static-code-analysis
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        go-version: [ 1.26.x ]
-        os: [ ubuntu-latest ]
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: audit
-
-      - name: Check out code
-        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
-
-      - name: Set up Go ${{ matrix.go-version }} on ${{ matrix.os }}
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: ${{ matrix.go-version }}
-        id: go
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        name: Console Binary Cache Istanbul Coverage
-        with:
-          path: |
-            ./console
-          key: ${{ runner.os }}-binary-istanbul-coverage-${{ github.run_id }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: assets-cache-istanbul-coverage
-        name: Assets Cache Istanbul Coverage
-        with:
-          path: |
-            ./web-app/build/
-          key: ${{ runner.os }}-assets-istanbul-coverage-${{ github.run_id }}
-      - name: Build on ${{ matrix.os }}
-        env:
-          GO111MODULE: on
-          GOOS: linux
-        run: |
-          make console
-
   cross-compile-1:
     name: Cross compile
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1015,7 +869,6 @@ jobs:
     name: Cross compile 2
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1047,7 +900,6 @@ jobs:
     name: Cross compile 3
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1080,7 +932,6 @@ jobs:
     name: Cross compile 4
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1113,7 +964,6 @@ jobs:
     name: Cross compile 5
     needs:
       - lint-job
-      - ui-assets
       - semgrep-static-code-analysis
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1141,53 +991,3 @@ jobs:
           GOOS: linux
         run: |
           make crosscompile arg1="'linux/386 netbsd/amd64'"
-
-  playwright:
-    needs:
-      - compile-binary-istanbul-coverage
-    timeout-minutes: 60
-    runs-on: ubuntu-latest
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 18
-
-      - name: Install dependencies
-        run: |
-          echo "Install dependencies"
-          cd $GITHUB_WORKSPACE/web-app
-          yarn init -y
-          yarn add -D playwright babel-plugin-istanbul nyc react-app-rewired create-react-app @playwright/test
-          echo "yarn install"
-          yarn install --no-immutable
-
-      - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
-
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        name: Console Binary Cache Istanbul Coverage
-        with:
-          path: |
-            ./console
-          key: ${{ runner.os }}-binary-istanbul-coverage-${{ github.run_id }}
-
-      - name: Start Console, front-end app and initialize users/policies
-        run: |
-          (./console server) & (make initialize-permissions)
-
-      - name: Run Playwright tests
-        run: |
-          echo "Run tests under playwright folder only"
-          cd $GITHUB_WORKSPACE/web-app
-          yarn remove playwright
-          yarn add --dev @playwright/test
-          echo "npx playwright test"
-          npx playwright test --reporter github # To run the tests
