@@ -72,45 +72,6 @@ jobs:
           pip3 install semgrep
           semgrep --config semgrep.yaml $(pwd)/web-app --error
 
-  latest-minio:
-    name: Build latest MinIO
-    runs-on: [ ubuntu-latest ]
-    strategy:
-      matrix:
-        go-version: [ 1.26.x ]
-    steps:
-      # To build minio image, we need to clone the repository first
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: audit
-
-      - name: Clone github.com/minio/minio
-        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
-        with:
-          repository: minio/minio
-      - name: Check-out matching MinIO branch
-        env:
-          GH_BRANCH: ${{ github.head_ref || github.ref_name }}
-          GH_PR_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          GH_PR_ACCOUNT=`echo $GH_PR_REPO | sed "s/\\/.*//"`
-          if [ ! -z "$GH_PR_ACCOUNT" ] && [ ! "$GH_PR_ACCOUNT" = "minio" ]; then
-            ALTREPO="https://github.com/$GH_PR_ACCOUNT/minio.git"
-            echo "Attempting to fetch $ALTREPO..."
-            git remote add alt $ALTREPO
-            (git fetch alt && git checkout "alt/$GH_BRANCH") || echo "$ALTREPO ($GH_BRANCH) not available, so keeping default repository/branch"
-          fi
-      - name: Set up Go ${{ matrix.go-version }} on ${{ matrix.os }}
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: ${{ matrix.go-version }}
-        id: go-minio
-      - name: Build on ${{ matrix.os }}
-        if: steps.minio-latest-cache.outputs.cache-hit != 'true'
-        run: |
-          echo "Create minio binary";
-          make build;
   compile-binary:
     name: Compiles on Go ${{ matrix.go-version }} and ${{ matrix.os }}
     needs:
@@ -632,7 +593,6 @@ jobs:
     needs:
       - lint-job
       - semgrep-static-code-analysis
-      - latest-minio
     runs-on: ubuntu-latest
 
     strategy:
@@ -647,30 +607,6 @@ jobs:
 
       - name: Check out code
         uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
-      - name: Clone github.com/minio/minio
-        uses: actions/checkout@61b9e3751b92087fd0b06925ba6dd6314e06f089 # master
-        with:
-          repository: minio/minio
-          path: "minio_repository"
-      - name: Check-out matching MinIO branch
-        env:
-          GH_BRANCH: ${{ github.head_ref || github.ref_name }}
-          GH_PR_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          GH_PR_ACCOUNT=`echo $GH_PR_REPO | sed "s/\\/.*//"`
-          if [ ! -z "$GH_PR_ACCOUNT" ] && [ ! "$GH_PR_ACCOUNT" = "minio" ]; then
-            ALTREPO="https://github.com/$GH_PR_ACCOUNT/minio.git"
-            echo "Attempting to fetch $ALTREPO..."
-            git remote add alt $ALTREPO
-            (git fetch alt && git checkout "alt/$GH_BRANCH") || echo "$ALTREPO ($GH_BRANCH) not available, so keeping default repository/branch"
-          fi
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: minio-latest-cache
-        name: MinIO Latest Cache
-        with:
-          path: |
-            ./minio
-          key: ${{ runner.os }}-minio-latest-${{ hashFiles('./minio_repository/go.sum') }}
       - name: Set up Go ${{ matrix.go-version }} on ${{ matrix.os }}
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -679,29 +615,8 @@ jobs:
 
       - name: Build on ${{ matrix.os }}
         run: |
-          echo "The idea is to build minio image from downloaded repository";
-          cd $GITHUB_WORKSPACE/minio_repository;
-          echo "Get git version to build MinIO Image";
-          VERSION=`git rev-parse HEAD`;
-          echo $VERSION;
-          echo "Create MinIO image";
-          make docker VERSION=$VERSION;
-
-          docker build -q --no-cache -t minio/minio:$VERSION . -f Dockerfile
-          echo "Jumping back to console repository to run the integration test"
-          cd $GITHUB_WORKSPACE;
-          echo "We are going to use the built image on test-integration";
-          MINIO_VERSION="minio/minio:$VERSION";
-          echo $MINIO_VERSION;
-
-          echo "Create bucket for replication with versioning"
-          echo "Download mc for Ubuntu"
-          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc
-          echo "Change the permissions to execute mc command"
-          chmod +x mc
-
-          echo "Create the folder to put the all.out file"
-          make test-integration MINIO_VERSION=$MINIO_VERSION;
+          echo "Run the integration tests against the free Chainguard MinIO image (Makefile MINIO_VERSION default)"
+          make test-integration
 
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: coverage-cache
@@ -777,48 +692,6 @@ jobs:
           go build gocovmerge.go
           echo "put together the outs for final coverage resolution"
           ./gocovmerge ../integration/coverage/system.out ../api/coverage/coverage.out ../pkg/coverage/coverage-pkg.out > all.out
-          echo "Download mc for Ubuntu"
-          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc
-          echo "Change the permissions to execute mc command"
-          chmod +x mc
-          echo "Only run our test if play is up and running"
-          PLAY_IS_ON=`wget --spider --server-response https://play.min.io:9443/login 2>&1 | grep '200\ OK' | wc -l`
-          if [ $PLAY_IS_ON == 1 ]
-          then
-            echo "Play is up and running, we will proceed with the play part for coverage"
-            echo "Create the folder to put the all.out file"
-            ./mc mb --ignore-existing play/builds/
-            echo "Copy the all.out file to play bucket"
-            echo ${{ github.repository }}
-            echo ${{ github.event.number }}
-            echo ${{ github.run_id }}
-            # mc cp can fail due to lack of space: mc: <ERROR> Failed to copy `all.out`.
-            # Storage backend has reached its minimum free disk threshold. Please delete a few objects to proceed.
-            ./mc cp all.out play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp all.out play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            go tool cover -html=all.out -o coverage.html
-            ./mc cp coverage.html play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp coverage.html play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            # save all other coverage
-            go tool cover -html=../integration/coverage/system.out -o system.html
-            ./mc cp system.html play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp system.html play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            ./mc cp ../integration/coverage/system.out play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp ../integration/coverage/system.out play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            go tool cover -html=../api/coverage/coverage.out -o coverage.html
-            ./mc cp coverage.html play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp coverage.html play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            ./mc cp ../api/coverage/coverage.out play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp ../api/coverage/coverage.out play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            go tool cover -html=../pkg/coverage/coverage-pkg.out -o coverage-pkg.html
-            ./mc cp coverage-pkg.html play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp coverage-pkg.html play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            ./mc cp ../pkg/coverage/coverage-pkg.out play/builds/${{ github.repository }}/${{ github.event.number }}/${{ github.run_id }}/ || true
-            ./mc cp ../pkg/coverage/coverage-pkg.out play/builds/${{ github.repository }}/${{ github.event.number }}/latest/ || true
-            ./mc anonymous set public play/builds
-          else
-            echo "Play is down, please report it on hack channel, no coverage is going to be uploaded!!!"
-          fi
           echo "grep to obtain the result"
           go tool cover -func=all.out | grep total > tmp2
           result=`cat tmp2 | awk 'END {print $3}'`
