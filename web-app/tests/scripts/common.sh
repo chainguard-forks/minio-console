@@ -11,6 +11,19 @@
 # # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+# dl.min.io now answers "410 Gone" (the old curl/wget saved that text as the mc
+# binary), so build the last archived mc release from the Go module proxy instead.
+install_mc() {
+  local dest="${MC_INSTALL_DIR:-/usr/local/bin}"
+  if mc --version >/dev/null 2>&1; then
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp -d)"
+  GOBIN="$tmp" go install github.com/minio/mc@RELEASE.2025-08-13T08-35-41Z || return 1
+  mv "$tmp/mc" "$dest/mc" 2>/dev/null || sudo mv "$tmp/mc" "$dest/mc"
+}
+
 add_alias() {
   for i in $(seq 1 4); do
     echo "... attempting to add alias $i"

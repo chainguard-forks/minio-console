@@ -62,9 +62,7 @@ __init__() {
   *) ;;
   esac
 
-  curl -sLO "https://dl.min.io/client/mc/release/$OS-$ARCH/mc" -o mc
-  chmod +x mc
-  mv mc /usr/local/bin
+  install_mc
 
   add_alias
 }

@@ -1,3 +1,7 @@
+SCRIPT_DIR=$(dirname "$0")
+export SCRIPT_DIR
+source "${SCRIPT_DIR}/common.sh"
+
 add_alias() {
   for i in $(seq 1 4); do
     echo "... attempting to add alias $i"
@@ -69,8 +73,7 @@ __init__() {
   export GOPATH=/tmp/gopath
   export PATH=${PATH}:${GOPATH}/bin
 
-  wget https://dl.min.io/client/mc/release/linux-amd64/mc
-  chmod +x mc
+  install_mc
 
   add_alias
 }
