@@ -214,10 +214,14 @@ the `CONSOLE_DEBUG_LOGLEVEL` environment variable to one of the following values
 
 The detailed logging also includes all request and response headers (if any).
 
-Credentials are not logged. `REDACTED` replaces the values of the `Authorization`, `Cookie`,
-`Proxy-Authorization` and `Set-Cookie` headers, the values of the query parameters `sts`, `sts_a`
-and `sts_s` (also where the `Referer` header repeats them), and the presigned URL in the link of a
-shared object.
+The debug log shows `REDACTED` in place of:
+
+ - the values of the `Authorization`, `Cookie`, `Proxy-Authorization`, `Set-Cookie` and `X-Amz-Security-Token` headers;
+ - in the URL and in the values of all other headers: the values of the query parameters `access_token`, `sts`, `sts_a`,
+   `sts_s`, `X-Amz-Credential`, `X-Amz-Security-Token` and `X-Amz-Signature`, the presigned URL in the link of a shared
+   object, and a password in a URL.
+
+Everything else is logged as it was received, so treat the debug log as sensitive.
  
 # Contribute to console Project
 

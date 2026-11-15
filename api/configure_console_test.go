@@ -25,6 +25,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/minio/console/pkg/auth"
+	"github.com/minio/console/pkg/logger"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -150,9 +153,41 @@ func Test_debugLogURL(t *testing.T) {
 			want: "/?st%73=REDACTED",
 		},
 		{
+			name: "Parameter name in upper case",
+			url:  "/?STS=session-token",
+			want: "/?STS=REDACTED",
+		},
+		{
+			name: "Repeated parameter",
+			url:  "/?sts=one&cp=y&sts=two",
+			want: "/?sts=REDACTED&cp=y&sts=REDACTED",
+		},
+		{
+			name: "Empty value",
+			url:  "/?sts=&cp=y",
+			want: "/?sts=REDACTED&cp=y",
+		},
+		{
 			name: "Parameter without a value",
 			url:  "/?sts&cp=y",
 			want: "/?sts&cp=y",
+		},
+		{
+			name: "Value with a semicolon",
+			url:  "/?sts=session;token&cp=y",
+			want: "/?sts=REDACTED&cp=y",
+		},
+		{
+			name: "Token in place of the Authorization header",
+			url:  "/api/v1/session?access_token=claims",
+			want: "/api/v1/session?access_token=REDACTED",
+		},
+		{
+			name: "Presigned S3 request",
+			url: "/bucket/object?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=access-key%2F20261115%2Fus-east-1%2Fs3%2Faws4_request" +
+				"&X-Amz-Security-Token=session-token&X-Amz-Signature=signature",
+			want: "/bucket/object?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=REDACTED" +
+				"&X-Amz-Security-Token=REDACTED&X-Amz-Signature=REDACTED",
 		},
 		{
 			name: "Shared object",
@@ -164,6 +199,21 @@ func Test_debugLogURL(t *testing.T) {
 			url:  "/console/subpath/api/v1/download-shared-object/aHR0cDovL3NvbWV1cmw",
 			want: "/console/subpath/api/v1/download-shared-object/REDACTED",
 		},
+		{
+			name: "Object browser path that is not a shared object",
+			url:  "/browser/download-shared-object/bWFudWFsLnBkZg",
+			want: "/browser/download-shared-object/bWFudWFsLnBkZg",
+		},
+		{
+			name: "Password in an absolute URL",
+			url:  "https://alice:password@console.example.com/?sts=session-token",
+			want: "https://alice:REDACTED@console.example.com/?sts=REDACTED",
+		},
+		{
+			name: "Opaque URL",
+			url:  "https:api/v1/download-shared-object/aHR0cDovL3NvbWV1cmw?sts=session-token",
+			want: "https:api/v1/download-shared-object/REDACTED?sts=REDACTED",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -172,6 +222,7 @@ func Test_debugLogURL(t *testing.T) {
 			assert.Equal(t, tt.want, debugLogURL(u))
 		})
 	}
+	assert.Equal(t, "", debugLogURL(nil))
 }
 
 func Test_debugLogHeaderValue(t *testing.T) {
@@ -184,8 +235,8 @@ func Test_debugLogHeaderValue(t *testing.T) {
 		{
 			name:  "Header without credentials",
 			key:   "Accept",
-			value: "application/json",
-			want:  "application/json",
+			value: "text/html,application/xhtml+xml;q=0.9",
+			want:  "text/html,application/xhtml+xml;q=0.9",
 		},
 		{
 			name:  "Authorization",
@@ -197,6 +248,12 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			name:  "Key that is not canonical",
 			key:   "set-cookie",
 			value: "token=secret; Path=/; HttpOnly",
+			want:  "REDACTED",
+		},
+		{
+			name:  "Session token of an S3 request",
+			key:   "X-Amz-Security-Token",
+			value: "session-token",
 			want:  "REDACTED",
 		},
 		{
@@ -212,10 +269,34 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			want:  "https://console.example.com/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
 		},
 		{
-			name:  "Referer that is not a URL",
+			name:  "Referer that is not a valid URL",
 			key:   "Referer",
 			value: "%zz?sts=session-token",
-			want:  "REDACTED",
+			want:  "%zz?sts=REDACTED",
+		},
+		{
+			name:  "Referer with a password",
+			key:   "Referer",
+			value: "https://alice:p@ssword@console.example.com:9090/browser",
+			want:  "https://alice:REDACTED@console.example.com:9090/browser",
+		},
+		{
+			name:  "URL with a port and no password",
+			key:   "Origin",
+			value: "https://console.example.com:9090",
+			want:  "https://console.example.com:9090",
+		},
+		{
+			name:  "Location of the redirect from /index.html",
+			key:   "Location",
+			value: "./?sts=session-token&sts_a=access-key&sts_s=secret-key",
+			want:  "./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
+		},
+		{
+			name:  "URL passed on by a reverse proxy",
+			key:   "X-Original-Uri",
+			value: "/console/?sts=session-token&sts_a=access-key&sts_s=secret-key",
+			want:  "/console/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
 		},
 	}
 	for _, tt := range tests {
@@ -245,15 +326,50 @@ func Test_debugLogHeaders(t *testing.T) {
 	assert.Equal(t, want, sb.String())
 }
 
-// AuthenticationMiddleware adds the Authorization header to the request that DebugLogMiddleware,
-// which wraps it, logs afterwards.
-func Test_debugLogHeaders_afterAuthentication(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
-	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	AuthenticationMiddleware(next).ServeHTTP(httptest.NewRecorder(), r)
-	assert.NotEmpty(t, r.Header.Get("Authorization"))
+// AuthenticationMiddleware adds the decrypted session token to the request as its Authorization
+// header, and DebugLogMiddleware, which wraps it, logs the request afterwards.
+func Test_debugLog_sessionToken(t *testing.T) {
+	creds := &credentials.Value{
+		AccessKeyID:     "sts-access-key",
+		SecretAccessKey: "sts-secret-key",
+		SessionToken:    "sts-session-token",
+	}
+	token, err := auth.NewEncryptedTokenForClient(creds, "account-access-key", nil)
+	assert.NoError(t, err)
 
-	var sb strings.Builder
-	debugLogHeaders(&sb, r.Header)
-	assert.Equal(t, "Authorization: REDACTED\n", sb.String())
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	r.AddCookie(&http.Cookie{Name: "token", Value: token})
+	rw := logger.NewResponseWriter(httptest.NewRecorder())
+	AuthenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "token", Value: token})
+	})).ServeHTTP(rw, r)
+	assert.Contains(t, r.Header.Get("Authorization"), creds.SecretAccessKey)
+
+	details := debugLogDetailsText(r, rw)
+	for _, text := range []string{debugLogSummaryText(r, rw), details} {
+		for _, secret := range []string{creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, token} {
+			assert.NotContains(t, text, secret)
+		}
+	}
+	assert.Contains(t, details, "Authorization: REDACTED\n")
+	assert.Contains(t, details, "Cookie: REDACTED\n")
+	assert.Contains(t, details, "Set-Cookie: REDACTED\n")
+}
+
+// The file server redirects /index.html to / and repeats the query in the Location header.
+func Test_debugLog_indexRedirect(t *testing.T) {
+	secrets := []string{"sts-session-token", "sts-access-key", "sts-secret-key"}
+	r := httptest.NewRequest(http.MethodGet, "/index.html?sts="+secrets[0]+"&sts_a="+secrets[1]+"&sts_s="+secrets[2], nil)
+	rw := logger.NewResponseWriter(httptest.NewRecorder())
+	FileServerMiddleware(http.NotFoundHandler()).ServeHTTP(rw, r)
+	assert.Equal(t, http.StatusMovedPermanently, rw.StatusCode)
+	assert.Contains(t, rw.Header().Get("Location"), secrets[2])
+
+	details := debugLogDetailsText(r, rw)
+	for _, text := range []string{debugLogSummaryText(r, rw), details} {
+		for _, secret := range secrets {
+			assert.NotContains(t, text, secret)
+		}
+	}
+	assert.Contains(t, details, "Location: ./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED\n")
 }
