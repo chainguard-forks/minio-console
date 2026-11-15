@@ -300,9 +300,16 @@ var debugLogURLHeaders = map[string]bool{
 
 // debugLogSecretQueryParams are the query parameters whose values are credentials, in lower
 // case: the token that the API accepts in place of the Authorization header, the STS credentials
-// that handleSPA accepts, and the parameters of a presigned S3 request.
+// that handleSPA accepts, and the parameters of a presigned S3 request, with a signature of
+// version 4 or of version 2. The console reads the fields of the login request, accessKey and
+// secretKey, from the body of the request only; they are here for the client that sends them in
+// the URL by mistake.
 var debugLogSecretQueryParams = map[string]bool{
 	"access_token":         true,
+	"accesskey":            true,
+	"awsaccesskeyid":       true,
+	"secretkey":            true,
+	"signature":            true,
 	"sts":                  true,
 	"sts_a":                true,
 	"sts_s":                true,
@@ -330,44 +337,66 @@ func debugLogURL(u *url.URL) string {
 // A request line, and a header that repeats it, can be read in two ways: the server takes all
 // that follows the first "?" for the query, while a URL parser ends the query at a "#". Either
 // reading must not show a credential, so all that follows the first "?" or "#" is searched for
-// parameters, and only what precedes it is parsed as a URL.
+// parameters. What precedes it is searched for a shared object as text, and parsed as a URL
+// only to find a password.
 func debugLogURLText(text string) string {
 	head, params := text, ""
 	if i := strings.IndexAny(text, "?#"); i >= 0 {
 		head, params = text[:i], text[i:]
 	}
+	head, ok := debugLogSharedObject(head)
+	if !ok {
+		return debugLogRedacted
+	}
 	u, err := url.Parse(head)
 	if err != nil {
 		return debugLogRedacted
 	}
-	redacted := *u
 	if _, hasPassword := u.User.Password(); hasPassword {
-		redacted.User = url.UserPassword(u.User.Username(), debugLogRedacted)
-	}
-	if p, found := debugLogSharedObject(u.Path); found {
-		redacted.Path, redacted.RawPath = p, ""
-	}
-	if opaque, found := debugLogSharedObject(u.Opaque); found {
-		redacted.Opaque = opaque
-	}
-	if redactedHead := redacted.String(); redactedHead != u.String() {
-		head = redactedHead
+		u.User = url.UserPassword(u.User.Username(), debugLogRedacted)
+		head = u.String()
 	}
 	return head + debugLogParams(params)
 }
 
 // debugLogSharedObject replaces all that follows a segment named debugLogSharedObjectSegment in
-// a path. It does not ask whether the path is the route of a shared object: the router cleans a
-// path before it matches a route, and a path that matches no route can still hold a presigned
-// URL that is valid.
-func debugLogSharedObject(p string) (string, bool) {
-	segments := strings.Split(p, "/")
+// the text of a URL, without its parameters. It reports false when a segment cannot be
+// unescaped.
+//
+// It takes the text for segments between slashes and does not parse it, because one text can be
+// parsed in more than one way: the server reads "//download-shared-object/x" as a path, while a
+// URL parser reads a host and a path. It compares a segment after unescaping it, in any case,
+// and an escaped slash separates segments as a slash does.
+//
+// It does not ask whether the text holds the route of a shared object: the router cleans a path
+// before it matches a route, and a path that matches no route can still hold a presigned URL
+// that is valid.
+func debugLogSharedObject(head string) (string, bool) {
+	segments := strings.Split(head, "/")
 	for i, segment := range segments {
-		if strings.EqualFold(segment, debugLogSharedObjectSegment) && strings.Trim(strings.Join(segments[i+1:], "/"), "/") != "" {
-			return strings.Join(segments[:i+1], "/") + "/" + debugLogRedacted, true
+		unescaped, err := url.PathUnescape(segment)
+		if err != nil {
+			return "", false
+		}
+		names := strings.Split(unescaped, "/")
+		for j, name := range names {
+			if !strings.EqualFold(name, debugLogSharedObjectSegment) {
+				continue
+			}
+			rest := strings.Join(names[j+1:], "/") + "/" + strings.Join(segments[i+1:], "/")
+			if strings.Trim(rest, "/") == "" {
+				// Nothing follows the segment.
+				return head, true
+			}
+			kept := segments[:i+1]
+			if j < len(names)-1 {
+				// The presigned URL begins in this segment, after an escaped slash.
+				kept = append(segments[:i:i], debugLogSharedObjectSegment)
+			}
+			return strings.Join(kept, "/") + "/" + debugLogRedacted, true
 		}
 	}
-	return "", false
+	return head, true
 }
 
 // debugLogParams replaces the value of each parameter in debugLogSecretQueryParams. It splits

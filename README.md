@@ -217,13 +217,15 @@ The detailed logging also includes all request and response headers (if any).
 The debug log shows `REDACTED` in place of:
 
  - the values of the `Authorization`, `Cookie`, `Proxy-Authorization`, `Set-Cookie` and `X-Amz-Security-Token` headers;
- - in the URL of the request: a password, the values of the parameters `access_token`, `sts`, `sts_a`, `sts_s`,
-   `X-Amz-Credential`, `X-Amz-Security-Token` and `X-Amz-Signature`, and all that follows a path segment named
-   `download-shared-object`, which in the link of a shared object is its presigned URL;
+ - in the URL of the request: a password, the values of the parameters `access_token`, `accessKey`, `AWSAccessKeyId`,
+   `secretKey`, `Signature`, `sts`, `sts_a`, `sts_s`, `X-Amz-Credential`, `X-Amz-Security-Token` and `X-Amz-Signature`,
+   and all that follows a path segment named `download-shared-object`, which in the link of a shared object is its
+   presigned URL;
  - the same in the URLs of the `Content-Location`, `Location`, `Referer`, `X-Envoy-Original-Path`, `X-Forwarded-Uri`,
    `X-Original-Uri`, `X-Original-Url` and `X-Rewrite-Url` headers.
 
-The debug log does not recognize credentials in any other place, so treat it as sensitive.
+This list covers the credentials that the console itself reads or issues. The debug log does not recognize a credential
+that a client sends in any other place or under any other name, so treat it as sensitive.
  
 # Contribute to console Project
 

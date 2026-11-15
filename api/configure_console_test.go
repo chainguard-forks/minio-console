@@ -17,14 +17,17 @@
 package api
 
 import (
+	"bufio"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-openapi/loads"
 	"github.com/minio/console/api/operations"
@@ -220,6 +223,17 @@ func Test_debugLogURL(t *testing.T) {
 				"&X-Amz-Security-Token=REDACTED&X-Amz-Signature=REDACTED",
 		},
 		{
+			name:   "Presigned S3 request with a signature of version 2",
+			target: "/bucket/object?AWSAccessKeyId=access-key&Expires=1763300000&Signature=signature",
+			want:   "/bucket/object?AWSAccessKeyId=REDACTED&Expires=1763300000&Signature=REDACTED",
+		},
+		{
+			name:   "Fields of the login request sent as parameters",
+			method: http.MethodPost,
+			target: "/api/v1/login?accessKey=access-key&secretKey=secret-key",
+			want:   "/api/v1/login?accessKey=REDACTED&secretKey=REDACTED",
+		},
+		{
 			name:   "Shared object",
 			target: "/api/v1/download-shared-object/" + token,
 			want:   "/api/v1/download-shared-object/REDACTED",
@@ -252,7 +266,22 @@ func Test_debugLogURL(t *testing.T) {
 		{
 			name:   "Shared object with an escaped character in the segment",
 			target: "/api/v1/download-shared-objec%74/" + token,
+			want:   "/api/v1/download-shared-objec%74/REDACTED",
+		},
+		{
+			name:   "Shared object after an escaped slash",
+			target: "/api/v1/download-shared-object%2F" + token,
 			want:   "/api/v1/download-shared-object/REDACTED",
+		},
+		{
+			name:   "Shared object after two slashes at the start of the path",
+			target: "//download-shared-object/" + token,
+			want:   "//download-shared-object/REDACTED",
+		},
+		{
+			name:   "Shared object after two slashes at the start of the path of the API",
+			target: "//api/v1/download-shared-object/" + token,
+			want:   "//api/v1/download-shared-object/REDACTED",
 		},
 		{
 			name:   "Shared object followed by another segment",
@@ -299,6 +328,11 @@ func Test_debugLogURL(t *testing.T) {
 			name:   "Opaque URL",
 			target: "https:api/v1/download-shared-object/" + token + "?sts=session-token",
 			want:   "https:api/v1/download-shared-object/REDACTED?sts=REDACTED",
+		},
+		{
+			name:   "Opaque URL with an escaped character in the segment",
+			target: "https:api/v1/download-shared-objec%74/" + token,
+			want:   "https:api/v1/download-shared-objec%74/REDACTED",
 		},
 	}
 	for _, tt := range tests {
@@ -375,6 +409,36 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			key:   "Referer",
 			value: "//alice:password@console.example.com/browser",
 			want:  "//alice:REDACTED@console.example.com/browser",
+		},
+		{
+			name:  "Referer with a presigned S3 URL with a signature of version 2",
+			key:   "Referer",
+			value: "https://minio.example.com/bucket/object?AWSAccessKeyId=access-key&Expires=1763300000&Signature=signature",
+			want:  "https://minio.example.com/bucket/object?AWSAccessKeyId=REDACTED&Expires=1763300000&Signature=REDACTED",
+		},
+		{
+			name:  "Referer with a shared object in an opaque URL with an escaped character",
+			key:   "Referer",
+			value: "https:api/v1/download-shared-objec%74/aHR0cDovL3NvbWV1cmw",
+			want:  "https:api/v1/download-shared-objec%74/REDACTED",
+		},
+		{
+			name:  "Referer with a shared object after two slashes and no scheme",
+			key:   "Referer",
+			value: "//download-shared-object/aHR0cDovL3NvbWV1cmw",
+			want:  "//download-shared-object/REDACTED",
+		},
+		{
+			name:  "Referer with a shared object and a password",
+			key:   "Referer",
+			value: "https://alice:password@console.example.com/api/v1/download-shared-object/aHR0cDovL3NvbWV1cmw",
+			want:  "https://alice:REDACTED@console.example.com/api/v1/download-shared-object/REDACTED",
+		},
+		{
+			name:  "Referer with a segment that cannot be unescaped",
+			key:   "Referer",
+			value: "https://console.example.com/a%zz/download-shared-object/aHR0cDovL3NvbWV1cmw",
+			want:  "REDACTED",
 		},
 		{
 			name:  "Referer that is not a valid URL",
@@ -506,6 +570,7 @@ func Test_debugLog_server(t *testing.T) {
 	secrets := []string{
 		creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, cookie, sharedObject,
 		"basic-credentials", "access-token-claims", "number-sign-secret", "semicolon-secret",
+		"login-access-key", "login-secret-key",
 	}
 
 	get := func(target string) *http.Request {
@@ -582,6 +647,18 @@ func Test_debugLog_server(t *testing.T) {
 			status: http.StatusNotFound,
 		},
 		{
+			name:    "Shared object after two slashes at the start of the path",
+			request: func() *http.Request { return get("//download-shared-object/" + sharedObject) },
+			status:  http.StatusOK,
+		},
+		{
+			name: "Fields of the login request sent as parameters, without a body",
+			request: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/api/v1/login?accessKey=login-access-key&secretKey=login-secret-key", nil)
+			},
+			status: http.StatusUnprocessableEntity,
+		},
+		{
 			name: "Websocket handshake",
 			request: func() *http.Request {
 				r := withCookie(get("/ws/objectManager"))
@@ -600,6 +677,8 @@ func Test_debugLog_server(t *testing.T) {
 			"/index.html?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED ",
 			"/index.html?x=#f&sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED ",
 			"/api/v1/download-shared-object/REDACTED ",
+			"//download-shared-object/REDACTED ",
+			"/api/v1/login?accessKey=REDACTED&secretKey=REDACTED ",
 			"/?x=1;sts_s=REDACTED ",
 		},
 		"6": {
@@ -643,5 +722,59 @@ func Test_debugLog_server(t *testing.T) {
 				assert.Contains(t, text, want)
 			}
 		})
+	}
+}
+
+// A websocket handshake that succeeds. The server hands the connection over to the websocket,
+// and DebugLogMiddleware logs the request when the handler returns. No handler serves the path
+// of the request, so the server closes the websocket as soon as it is open and creates no MinIO
+// client.
+func Test_debugLog_websocket(t *testing.T) {
+	creds := &credentials.Value{
+		AccessKeyID:     "sts-access-key",
+		SecretAccessKey: "sts-secret-key",
+		SessionToken:    "sts-session-token",
+	}
+	cookie, err := auth.NewEncryptedTokenForClient(creds, "account-access-key", nil)
+	assert.NoError(t, err)
+
+	t.Setenv("CONSOLE_DEBUG_LOGLEVEL", "6")
+	logged := make(chan string, 1)
+	original := debugLogInfo
+	debugLogInfo = func(text string) { logged <- text }
+	defer func() { debugLogInfo = original }()
+
+	spec, err := loads.Embedded(SwaggerJSON, FlatSwaggerJSON)
+	assert.NoError(t, err)
+	consoleAPI := operations.NewConsoleAPI(spec)
+	consoleAPI.Logger = func(string, ...interface{}) {}
+	server := httptest.NewServer(configureAPI(consoleAPI))
+	defer server.Close()
+
+	address := server.Listener.Addr().String()
+	conn, err := net.Dial("tcp", address)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer conn.Close()
+	_, err = fmt.Fprintf(conn, "GET /ws/none?sts_s=query-secret HTTP/1.1\r\nHost: %s\r\n"+
+		"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"+
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: token=%s\r\n\r\n", address, cookie)
+	assert.NoError(t, err)
+	status, err := bufio.NewReader(conn).ReadString('\n')
+	assert.NoError(t, err)
+	assert.Contains(t, status, " 101 ")
+
+	select {
+	case text := <-logged:
+		assert.Contains(t, text, "GET /ws/none?sts_s=REDACTED\n")
+		assert.Contains(t, text, "<hijacked, probably a websocket>")
+		assert.Contains(t, text, "Authorization: REDACTED\n")
+		assert.Contains(t, text, "Cookie: REDACTED\n")
+		for _, secret := range []string{creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, cookie, "query-secret"} {
+			assert.NotContains(t, text, secret)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the debug log did not record the request")
 	}
 }
