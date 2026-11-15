@@ -311,61 +311,97 @@ var debugLogSecretQueryParams = map[string]bool{
 	"x-amz-signature":      true,
 }
 
-// debugLogSharedObjectRoute is the route of the link of a shared object. What follows it is a
-// presigned URL.
-const debugLogSharedObjectRoute = "api/v1/download-shared-object/"
+// debugLogSharedObjectSegment is the last segment of the route of a shared object's link. What
+// follows it in the path is a presigned URL.
+const debugLogSharedObjectSegment = "download-shared-object"
 
-// debugLogURL returns the URL without the credentials it may carry: a password, the values of
-// the query parameters in debugLogSecretQueryParams and the presigned URL of a shared object.
+// debugLogURL returns the URL of a request as the debug log may show it.
 func debugLogURL(u *url.URL) string {
 	if u == nil {
 		return ""
+	}
+	return debugLogURLText(u.String())
+}
+
+// debugLogURLText returns the text of a URL without the credentials it may carry: a password,
+// the presigned URL of a shared object and the values of the parameters in
+// debugLogSecretQueryParams.
+//
+// A request line, and a header that repeats it, can be read in two ways: the server takes all
+// that follows the first "?" for the query, while a URL parser ends the query at a "#". Either
+// reading must not show a credential, so all that follows the first "?" or "#" is searched for
+// parameters, and only what precedes it is parsed as a URL.
+func debugLogURLText(text string) string {
+	head, params := text, ""
+	if i := strings.IndexAny(text, "?#"); i >= 0 {
+		head, params = text[:i], text[i:]
+	}
+	u, err := url.Parse(head)
+	if err != nil {
+		return debugLogRedacted
 	}
 	redacted := *u
 	if _, hasPassword := u.User.Password(); hasPassword {
 		redacted.User = url.UserPassword(u.User.Username(), debugLogRedacted)
 	}
-	if redacted.RawQuery = debugLogQuery(u.RawQuery); redacted.RawQuery != u.RawQuery {
-		// The server keeps a "#" of the request line in the last value of the query, while
-		// url.Parse, which reads the URL of a header, makes a fragment of what follows it.
-		redacted.Fragment, redacted.RawFragment = "", ""
-	}
-	if escapedPath, found := debugLogSharedObject(u.EscapedPath()); found {
-		redacted.RawPath = escapedPath
-		redacted.Path, _ = url.PathUnescape(escapedPath)
+	if p, found := debugLogSharedObject(u.Path); found {
+		redacted.Path, redacted.RawPath = p, ""
 	}
 	if opaque, found := debugLogSharedObject(u.Opaque); found {
 		redacted.Opaque = opaque
 	}
-	return redacted.String()
+	if redactedHead := redacted.String(); redactedHead != u.String() {
+		head = redactedHead
+	}
+	return head + debugLogParams(params)
 }
 
-// debugLogQuery splits the query as url.ParseQuery does and replaces the value of each parameter
-// in debugLogSecretQueryParams. A name that cannot be unescaped is taken for one of them.
-func debugLogQuery(rawQuery string) string {
-	pairs := strings.Split(rawQuery, "&")
-	for i, pair := range pairs {
-		key, _, hasValue := strings.Cut(pair, "=")
-		if !hasValue {
-			continue
-		}
-		if name, err := url.QueryUnescape(key); err != nil || debugLogSecretQueryParams[strings.ToLower(name)] {
-			pairs[i] = key + "=" + debugLogRedacted
+// debugLogSharedObject replaces all that follows a segment named debugLogSharedObjectSegment in
+// a path. It does not ask whether the path is the route of a shared object: the router cleans a
+// path before it matches a route, and a path that matches no route can still hold a presigned
+// URL that is valid.
+func debugLogSharedObject(p string) (string, bool) {
+	segments := strings.Split(p, "/")
+	for i, segment := range segments {
+		if strings.EqualFold(segment, debugLogSharedObjectSegment) && strings.Trim(strings.Join(segments[i+1:], "/"), "/") != "" {
+			return strings.Join(segments[:i+1], "/") + "/" + debugLogRedacted, true
 		}
 	}
-	return strings.Join(pairs, "&")
+	return "", false
 }
 
-// debugLogSharedObject looks for the link of a shared object in an escaped path. The router
-// cleans the path before it matches a route, so the path is cleaned here as well. The result is
-// the cleaned path with debugLogRedacted in place of all that follows the route.
-func debugLogSharedObject(escapedPath string) (string, bool) {
-	cleaned := path.Clean(escapedPath)
-	i := strings.Index(cleaned, debugLogSharedObjectRoute)
-	if i < 0 {
-		return "", false
+// debugLogParams replaces the value of each parameter in debugLogSecretQueryParams. It splits
+// the text at "&" as url.ParseQuery does. In each part it also looks for a name after a ";", a
+// "?" or a "#": ParseQuery does not find a parameter there, but the part is logged all the same.
+// The value of a parameter ends where its part ends.
+func debugLogParams(params string) string {
+	parts := strings.Split(params, "&")
+	for i, part := range parts {
+		start := 0
+		for {
+			piece := part[start:]
+			end := strings.IndexAny(piece, ";?#")
+			if end >= 0 {
+				piece = piece[:end]
+			}
+			if key, _, hasValue := strings.Cut(piece, "="); hasValue && debugLogSecretName(key) {
+				parts[i] = part[:start+len(key)] + "=" + debugLogRedacted
+				break
+			}
+			if end < 0 {
+				break
+			}
+			start += end + 1
+		}
 	}
-	return cleaned[:i+len(debugLogSharedObjectRoute)] + debugLogRedacted, true
+	return strings.Join(parts, "&")
+}
+
+// debugLogSecretName reports whether the escaped name of a parameter is in
+// debugLogSecretQueryParams. A name that cannot be unescaped is taken for one of them.
+func debugLogSecretName(escaped string) bool {
+	name, err := url.QueryUnescape(escaped)
+	return err != nil || debugLogSecretQueryParams[strings.ToLower(strings.TrimSpace(name))]
 }
 
 // debugLogHeaderValue returns the value of a header as the debug log may show it.
@@ -375,13 +411,7 @@ func debugLogHeaderValue(key, value string) string {
 		return debugLogRedacted
 	}
 	if debugLogURLHeaders[key] {
-		u, err := url.Parse(value)
-		if err != nil {
-			return debugLogRedacted
-		}
-		if redacted := debugLogURL(u); redacted != u.String() {
-			return redacted
-		}
+		return debugLogURLText(value)
 	}
 	return value
 }

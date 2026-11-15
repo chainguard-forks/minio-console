@@ -18,6 +18,7 @@ package api
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -192,6 +193,21 @@ func Test_debugLogURL(t *testing.T) {
 			want:   "/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
 		},
 		{
+			name:   "Parameters after a number sign",
+			target: "/?x=#f&sts=session-token&sts_a=access-key&sts_s=secret-key",
+			want:   "/?x=#f&sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
+		},
+		{
+			name:   "Number sign in the path",
+			target: "/#x?sts=session-token",
+			want:   "/%23x?sts=REDACTED",
+		},
+		{
+			name:   "Parameter after a semicolon",
+			target: "/?x=1;sts_s=secret-key&cp=y",
+			want:   "/?x=1;sts_s=REDACTED&cp=y",
+		},
+		{
 			name:   "Token in place of the Authorization header",
 			target: "/api/v1/session?access_token=claims",
 			want:   "/api/v1/session?access_token=REDACTED",
@@ -221,6 +237,21 @@ func Test_debugLogURL(t *testing.T) {
 		{
 			name:   "Shared object reached through a parent segment",
 			target: "/api/v1/buckets/../download-shared-object/" + token,
+			want:   "/api/v1/buckets/../download-shared-object/REDACTED",
+		},
+		{
+			name:   "Shared object in a path that matches no route",
+			target: "/api/v1/download-shared-object/" + token + "/../../missing",
+			want:   "/api/v1/download-shared-object/REDACTED",
+		},
+		{
+			name:   "Shared object with the segment in another case",
+			target: "/api/v1/Download-Shared-Object/" + token,
+			want:   "/api/v1/Download-Shared-Object/REDACTED",
+		},
+		{
+			name:   "Shared object with an escaped character in the segment",
+			target: "/api/v1/download-shared-objec%74/" + token,
 			want:   "/api/v1/download-shared-object/REDACTED",
 		},
 		{
@@ -239,9 +270,19 @@ func Test_debugLogURL(t *testing.T) {
 			want:   "/api/v1/buckets/b/objects?prefix=api/v1/download-shared-object/manual.pdf",
 		},
 		{
-			name:   "Object browser path that is not a shared object",
+			name:   "Any other path with a segment of that name",
 			target: "/browser/download-shared-object/bWFudWFsLnBkZg",
-			want:   "/browser/download-shared-object/bWFudWFsLnBkZg",
+			want:   "/browser/download-shared-object/REDACTED",
+		},
+		{
+			name:   "Path with that name inside a longer segment",
+			target: "/browser/my-download-shared-object/bWFudWFsLnBkZg",
+			want:   "/browser/my-download-shared-object/bWFudWFsLnBkZg",
+		},
+		{
+			name:   "Path that ends with the segment",
+			target: "/api/v1/download-shared-object/",
+			want:   "/api/v1/download-shared-object/",
 		},
 		{
 			name:   "Password in an absolute URL",
@@ -348,6 +389,18 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			want:  "./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
 		},
 		{
+			name:  "Location of the redirect, with a number sign before the parameters",
+			key:   "Location",
+			value: "./?x=#f&sts=session-token&sts_a=access-key&sts_s=secret-key",
+			want:  "./?x=#f&sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
+		},
+		{
+			name:  "Referer with parameters in its fragment",
+			key:   "Referer",
+			value: "https://console.example.com/callback#access_token=claims&state=x",
+			want:  "https://console.example.com/callback#access_token=REDACTED&state=x",
+		},
+		{
 			name:  "Request line passed on by a reverse proxy, with a number sign in a value",
 			key:   "X-Original-URI",
 			value: "/console/?sts=session-token&sts_a=access-key&sts_s=#secret-key",
@@ -436,7 +489,9 @@ func Test_debugLog_indexRedirect(t *testing.T) {
 }
 
 // Requests that carry credentials go through all the middleware and the router of the API, as
-// they do in the server, and what DebugLogMiddleware logs is read.
+// they do in the server, and what DebugLogMiddleware logs is read. No handler that contacts
+// MinIO is reached: the requests are answered by the file server, fail to find a route, fail
+// authentication, or ask for a shared object whose URL does not point to MinIO.
 func Test_debugLog_server(t *testing.T) {
 	creds := &credentials.Value{
 		AccessKeyID:     "sts-access-key",
@@ -447,35 +502,113 @@ func Test_debugLog_server(t *testing.T) {
 	assert.NoError(t, err)
 	presigned := "http://other.example.com/bucket/object?X-Amz-Signature=presigned-signature"
 	sharedObject := base64.RawURLEncoding.EncodeToString([]byte(presigned))
-	stsQuery := "?sts=" + creds.SessionToken + "&sts_a=" + creds.AccessKeyID + "&sts_s=" + creds.SecretAccessKey
-
+	stsParams := "sts=" + creds.SessionToken + "&sts_a=" + creds.AccessKeyID + "&sts_s=" + creds.SecretAccessKey
 	secrets := []string{
 		creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, cookie, sharedObject,
-		"basic-credentials", "access-token-claims", "number-sign-secret",
+		"basic-credentials", "access-token-claims", "number-sign-secret", "semicolon-secret",
 	}
-	requests := func() []*http.Request {
-		// No handler behind these requests is reached, so nothing contacts MinIO: the first route
-		// does not exist, the second request fails authentication and the shared objects are
-		// refused because their URL does not point to MinIO.
-		withCookie := httptest.NewRequest(http.MethodGet, "/api/v1/no-such-route", nil)
-		withCookie.AddCookie(&http.Cookie{Name: "token", Value: cookie})
-		withAccessToken := httptest.NewRequest(http.MethodGet, "/api/v1/buckets?access_token=access-token-claims", nil)
-		withAccessToken.Header.Set("Authorization", "Basic basic-credentials")
-		return []*http.Request{
-			withCookie,
-			withAccessToken,
-			httptest.NewRequest(http.MethodGet, "/"+stsQuery, nil),
-			httptest.NewRequest(http.MethodGet, "/index.html"+stsQuery, nil),
-			httptest.NewRequest(http.MethodGet, "/?sts=s&sts_a=a&sts_s=#number-sign-secret", nil),
-			httptest.NewRequest(http.MethodGet, "/api/v1/download-shared-object/"+sharedObject, nil),
-			httptest.NewRequest(http.MethodGet, "/api/v1/download-shared-object/./"+sharedObject, nil),
-			httptest.NewRequest(http.MethodGet, "/api/v1/download-shared-object//"+sharedObject, nil),
-		}
+
+	get := func(target string) *http.Request {
+		return httptest.NewRequest(http.MethodGet, target, nil)
+	}
+	withCookie := func(r *http.Request) *http.Request {
+		r.AddCookie(&http.Cookie{Name: "token", Value: cookie})
+		return r
+	}
+	tests := []struct {
+		name    string
+		request func() *http.Request
+		status  int
+	}{
+		{
+			name:    "Session cookie",
+			request: func() *http.Request { return withCookie(get("/api/v1/no-such-route")) },
+			status:  http.StatusNotFound,
+		},
+		{
+			name: "Token in the query next to an Authorization header that is not a Bearer one",
+			request: func() *http.Request {
+				r := get("/api/v1/buckets?access_token=access-token-claims")
+				r.Header.Set("Authorization", "Basic basic-credentials")
+				return r
+			},
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:    "STS credentials for the index page",
+			request: func() *http.Request { return get("/?" + stsParams) },
+			status:  http.StatusOK,
+		},
+		{
+			name:    "STS credentials on the redirect from /index.html",
+			request: func() *http.Request { return get("/index.html?" + stsParams) },
+			status:  http.StatusMovedPermanently,
+		},
+		{
+			name:    "STS credentials after a number sign on the redirect from /index.html",
+			request: func() *http.Request { return get("/index.html?x=#f&" + stsParams) },
+			status:  http.StatusMovedPermanently,
+		},
+		{
+			name:    "Number sign in a value",
+			request: func() *http.Request { return get("/?sts=s&sts_a=a&sts_s=#number-sign-secret") },
+			status:  http.StatusOK,
+		},
+		{
+			name:    "Parameter after a semicolon",
+			request: func() *http.Request { return get("/?x=1;sts_s=semicolon-secret") },
+			status:  http.StatusOK,
+		},
+		{
+			name:    "Shared object",
+			request: func() *http.Request { return get("/api/v1/download-shared-object/" + sharedObject) },
+			status:  http.StatusForbidden,
+		},
+		{
+			name:    "Shared object after a dot segment",
+			request: func() *http.Request { return get("/api/v1/download-shared-object/./" + sharedObject) },
+			status:  http.StatusForbidden,
+		},
+		{
+			name:    "Shared object after two slashes",
+			request: func() *http.Request { return get("/api/v1/download-shared-object//" + sharedObject) },
+			status:  http.StatusForbidden,
+		},
+		{
+			name: "Shared object in a path that matches no route",
+			request: func() *http.Request {
+				return get("/api/v1/download-shared-object/" + sharedObject + "/../../missing")
+			},
+			status: http.StatusNotFound,
+		},
+		{
+			name: "Websocket handshake",
+			request: func() *http.Request {
+				r := withCookie(get("/ws/objectManager"))
+				r.Header.Set("Connection", "Upgrade")
+				r.Header.Set("Upgrade", "websocket")
+				r.Header.Set("Sec-WebSocket-Version", "13")
+				r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+				return r
+			},
+			status: http.StatusInternalServerError,
+		},
 	}
 
 	for level, wanted := range map[string][]string{
-		"3": {"/index.html?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED", "/api/v1/download-shared-object/REDACTED"},
-		"6": {"Location: ./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED\n", "Authorization: REDACTED\n", "Cookie: REDACTED\n", "Set-Cookie: REDACTED\n"},
+		"3": {
+			"/index.html?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED ",
+			"/index.html?x=#f&sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED ",
+			"/api/v1/download-shared-object/REDACTED ",
+			"/?x=1;sts_s=REDACTED ",
+		},
+		"6": {
+			"Location: ./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED\n",
+			"Location: ./?x=#f&sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED\n",
+			"Authorization: REDACTED\n",
+			"Cookie: REDACTED\n",
+			"Set-Cookie: REDACTED\n",
+		},
 	} {
 		t.Run("Level "+level, func(t *testing.T) {
 			t.Setenv("CONSOLE_DEBUG_LOGLEVEL", level)
@@ -487,14 +620,21 @@ func Test_debugLog_server(t *testing.T) {
 			spec, err := loads.Embedded(SwaggerJSON, FlatSwaggerJSON)
 			assert.NoError(t, err)
 			consoleAPI := operations.NewConsoleAPI(spec)
-			consoleAPI.Logger = func(string, ...interface{}) {}
-			handler := configureAPI(consoleAPI)
-			sent := requests()
-			for _, r := range sent {
-				handler.ServeHTTP(httptest.NewRecorder(), r)
+			var apiLog []string
+			consoleAPI.Logger = func(format string, args ...interface{}) {
+				apiLog = append(apiLog, fmt.Sprintf(format, args...))
 			}
+			handler := configureAPI(consoleAPI)
 
-			assert.Len(t, logged, len(sent))
+			for _, tt := range tests {
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, tt.request())
+				assert.Equal(t, tt.status, w.Code, tt.name)
+			}
+			// The API read the token from the query: it reports that it could not validate it.
+			assert.Contains(t, strings.Join(apiLog, "\n"), "access-token-claims")
+
+			assert.Len(t, logged, len(tests))
 			text := strings.Join(logged, "\n")
 			for _, secret := range secrets {
 				assert.NotContains(t, text, secret)
