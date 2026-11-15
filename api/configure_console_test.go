@@ -715,6 +715,11 @@ func Test_debugLogHeaders(t *testing.T) {
 // The logger formats what it is given. A "%" in a URL must reach the output of the logger as it
 // is, in the summary and in the details. The other tests replace debugLogInfo and do not see
 // what the logger makes of a text; this one reads the output of the logger.
+//
+// It reads the output of the logger's default mode, which the console package writes to
+// color.Output. The JSON mode formats the same format and argument with fmt.Sprintf and prints
+// to the standard output; it is not tested here, because the logger has no way to leave that
+// mode again.
 func Test_debugLog_output(t *testing.T) {
 	var output bytes.Buffer
 	original := color.Output
