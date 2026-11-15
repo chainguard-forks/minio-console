@@ -17,14 +17,16 @@
 package api
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/go-openapi/loads"
+	"github.com/minio/console/api/operations"
 	"github.com/minio/console/pkg/auth"
 	"github.com/minio/console/pkg/logger"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -132,94 +134,141 @@ func Test_getSubPath(t *testing.T) {
 }
 
 func Test_debugLogURL(t *testing.T) {
+	const token = "aHR0cDovL3NvbWV1cmw"
 	tests := []struct {
-		name string
-		url  string
-		want string
+		name   string
+		method string
+		target string
+		want   string
 	}{
 		{
-			name: "No credentials",
-			url:  "/api/v1/buckets?limit=10&prefix=a%2Fb",
-			want: "/api/v1/buckets?limit=10&prefix=a%2Fb",
+			name:   "No credentials",
+			target: "/api/v1/buckets?limit=10&prefix=a%2Fb",
+			want:   "/api/v1/buckets?limit=10&prefix=a%2Fb",
 		},
 		{
-			name: "STS credentials for the index page",
-			url:  "/?sts=session-token&sts_a=access-key&sts_s=secret-key&ov_st=styles",
-			want: "/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED&ov_st=styles",
+			name:   "STS credentials for the index page",
+			target: "/?sts=session-token&sts_a=access-key&sts_s=secret-key&ov_st=styles",
+			want:   "/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED&ov_st=styles",
 		},
 		{
-			name: "Escaped parameter name",
-			url:  "/?st%73=session-token",
-			want: "/?st%73=REDACTED",
+			name:   "Escaped parameter name",
+			target: "/?st%73=session-token",
+			want:   "/?st%73=REDACTED",
 		},
 		{
-			name: "Parameter name in upper case",
-			url:  "/?STS=session-token",
-			want: "/?STS=REDACTED",
+			name:   "Parameter name in upper case",
+			target: "/?STS=session-token",
+			want:   "/?STS=REDACTED",
 		},
 		{
-			name: "Repeated parameter",
-			url:  "/?sts=one&cp=y&sts=two",
-			want: "/?sts=REDACTED&cp=y&sts=REDACTED",
+			name:   "Parameter name that cannot be unescaped",
+			target: "/?st%zzs=session-token&cp=y",
+			want:   "/?st%zzs=REDACTED&cp=y",
 		},
 		{
-			name: "Empty value",
-			url:  "/?sts=&cp=y",
-			want: "/?sts=REDACTED&cp=y",
+			name:   "Repeated parameter",
+			target: "/?sts=one&cp=y&sts=two",
+			want:   "/?sts=REDACTED&cp=y&sts=REDACTED",
 		},
 		{
-			name: "Parameter without a value",
-			url:  "/?sts&cp=y",
-			want: "/?sts&cp=y",
+			name:   "Empty value",
+			target: "/?sts=&cp=y",
+			want:   "/?sts=REDACTED&cp=y",
 		},
 		{
-			name: "Value with a semicolon",
-			url:  "/?sts=session;token&cp=y",
-			want: "/?sts=REDACTED&cp=y",
+			name:   "Parameter without a value",
+			target: "/?sts&cp=y",
+			want:   "/?sts&cp=y",
 		},
 		{
-			name: "Token in place of the Authorization header",
-			url:  "/api/v1/session?access_token=claims",
-			want: "/api/v1/session?access_token=REDACTED",
+			name:   "Value with a semicolon",
+			target: "/?sts=session;token&cp=y",
+			want:   "/?sts=REDACTED&cp=y",
+		},
+		{
+			name:   "Value with a number sign",
+			target: "/?sts=session-token&sts_a=access-key&sts_s=#secret-key",
+			want:   "/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
+		},
+		{
+			name:   "Token in place of the Authorization header",
+			target: "/api/v1/session?access_token=claims",
+			want:   "/api/v1/session?access_token=REDACTED",
 		},
 		{
 			name: "Presigned S3 request",
-			url: "/bucket/object?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=access-key%2F20261115%2Fus-east-1%2Fs3%2Faws4_request" +
+			target: "/bucket/object?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=access-key%2F20261115%2Fus-east-1%2Fs3%2Faws4_request" +
 				"&X-Amz-Security-Token=session-token&X-Amz-Signature=signature",
 			want: "/bucket/object?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=REDACTED" +
 				"&X-Amz-Security-Token=REDACTED&X-Amz-Signature=REDACTED",
 		},
 		{
-			name: "Shared object",
-			url:  "/api/v1/download-shared-object/aHR0cDovL3NvbWV1cmw",
-			want: "/api/v1/download-shared-object/REDACTED",
+			name:   "Shared object",
+			target: "/api/v1/download-shared-object/" + token,
+			want:   "/api/v1/download-shared-object/REDACTED",
 		},
 		{
-			name: "Shared object under a subpath",
-			url:  "/console/subpath/api/v1/download-shared-object/aHR0cDovL3NvbWV1cmw",
-			want: "/console/subpath/api/v1/download-shared-object/REDACTED",
+			name:   "Shared object after a dot segment",
+			target: "/api/v1/download-shared-object/./" + token,
+			want:   "/api/v1/download-shared-object/REDACTED",
 		},
 		{
-			name: "Object browser path that is not a shared object",
-			url:  "/browser/download-shared-object/bWFudWFsLnBkZg",
-			want: "/browser/download-shared-object/bWFudWFsLnBkZg",
+			name:   "Shared object after two slashes",
+			target: "/api/v1/download-shared-object//" + token,
+			want:   "/api/v1/download-shared-object/REDACTED",
 		},
 		{
-			name: "Password in an absolute URL",
-			url:  "https://alice:password@console.example.com/?sts=session-token",
-			want: "https://alice:REDACTED@console.example.com/?sts=REDACTED",
+			name:   "Shared object reached through a parent segment",
+			target: "/api/v1/buckets/../download-shared-object/" + token,
+			want:   "/api/v1/download-shared-object/REDACTED",
 		},
 		{
-			name: "Opaque URL",
-			url:  "https:api/v1/download-shared-object/aHR0cDovL3NvbWV1cmw?sts=session-token",
-			want: "https:api/v1/download-shared-object/REDACTED?sts=REDACTED",
+			name:   "Shared object followed by another segment",
+			target: "/api/v1/download-shared-object/" + token + "/extra",
+			want:   "/api/v1/download-shared-object/REDACTED",
+		},
+		{
+			name:   "Shared object under a subpath with an escaped character",
+			target: "/console/sub%20path/api/v1/download-shared-object/" + token,
+			want:   "/console/sub%20path/api/v1/download-shared-object/REDACTED",
+		},
+		{
+			name:   "Object listing whose prefix looks like a shared object",
+			target: "/api/v1/buckets/b/objects?prefix=api/v1/download-shared-object/manual.pdf",
+			want:   "/api/v1/buckets/b/objects?prefix=api/v1/download-shared-object/manual.pdf",
+		},
+		{
+			name:   "Object browser path that is not a shared object",
+			target: "/browser/download-shared-object/bWFudWFsLnBkZg",
+			want:   "/browser/download-shared-object/bWFudWFsLnBkZg",
+		},
+		{
+			name:   "Password in an absolute URL",
+			target: "http://alice:password@console.example.com/?sts=session-token",
+			want:   "http://alice:REDACTED@console.example.com/?sts=REDACTED",
+		},
+		{
+			name:   "Password in the authority of a CONNECT request",
+			method: http.MethodConnect,
+			target: "alice:password@console.example.com:443",
+			want:   "//alice:REDACTED@console.example.com:443",
+		},
+		{
+			name:   "Opaque URL",
+			target: "https:api/v1/download-shared-object/" + token + "?sts=session-token",
+			want:   "https:api/v1/download-shared-object/REDACTED?sts=REDACTED",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			u, err := url.Parse(tt.url)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.want, debugLogURL(u))
+			method := tt.method
+			if method == "" {
+				method = http.MethodGet
+			}
+			// httptest.NewRequest reads the request line as the server does.
+			r := httptest.NewRequest(method, tt.target, nil)
+			assert.Equal(t, tt.want, debugLogURL(r.URL))
 		})
 	}
 	assert.Equal(t, "", debugLogURL(nil))
@@ -237,6 +286,12 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			key:   "Accept",
 			value: "text/html,application/xhtml+xml;q=0.9",
 			want:  "text/html,application/xhtml+xml;q=0.9",
+		},
+		{
+			name:  "Header that is not a URL",
+			key:   "User-Agent",
+			value: "client sts=ready revision=2",
+			want:  "client sts=ready revision=2",
 		},
 		{
 			name:  "Authorization",
@@ -259,8 +314,8 @@ func Test_debugLogHeaderValue(t *testing.T) {
 		{
 			name:  "Referer without credentials",
 			key:   "Referer",
-			value: "https://console.example.com/browser/bucket?prefix=a%2Fb",
-			want:  "https://console.example.com/browser/bucket?prefix=a%2Fb",
+			value: "https://console.example.com/browser/bucket?prefix=a%2Fb#top",
+			want:  "https://console.example.com/browser/bucket?prefix=a%2Fb#top",
 		},
 		{
 			name:  "Referer with credentials",
@@ -269,22 +324,22 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			want:  "https://console.example.com/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
 		},
 		{
-			name:  "Referer that is not a valid URL",
-			key:   "Referer",
-			value: "%zz?sts=session-token",
-			want:  "%zz?sts=REDACTED",
-		},
-		{
 			name:  "Referer with a password",
 			key:   "Referer",
 			value: "https://alice:p@ssword@console.example.com:9090/browser",
 			want:  "https://alice:REDACTED@console.example.com:9090/browser",
 		},
 		{
-			name:  "URL with a port and no password",
-			key:   "Origin",
-			value: "https://console.example.com:9090",
-			want:  "https://console.example.com:9090",
+			name:  "Referer with a password and no scheme",
+			key:   "Referer",
+			value: "//alice:password@console.example.com/browser",
+			want:  "//alice:REDACTED@console.example.com/browser",
+		},
+		{
+			name:  "Referer that is not a valid URL",
+			key:   "Referer",
+			value: "%zz?sts=session-token",
+			want:  "REDACTED",
 		},
 		{
 			name:  "Location of the redirect from /index.html",
@@ -293,10 +348,16 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			want:  "./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
 		},
 		{
-			name:  "URL passed on by a reverse proxy",
-			key:   "X-Original-Uri",
-			value: "/console/?sts=session-token&sts_a=access-key&sts_s=secret-key",
+			name:  "Request line passed on by a reverse proxy, with a number sign in a value",
+			key:   "X-Original-URI",
+			value: "/console/?sts=session-token&sts_a=access-key&sts_s=#secret-key",
 			want:  "/console/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
+		},
+		{
+			name:  "URL with a port in a header that is not in the list",
+			key:   "Origin",
+			value: "https://console.example.com:9090",
+			want:  "https://console.example.com:9090",
 		},
 	}
 	for _, tt := range tests {
@@ -372,4 +433,75 @@ func Test_debugLog_indexRedirect(t *testing.T) {
 		}
 	}
 	assert.Contains(t, details, "Location: ./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED\n")
+}
+
+// Requests that carry credentials go through all the middleware and the router of the API, as
+// they do in the server, and what DebugLogMiddleware logs is read.
+func Test_debugLog_server(t *testing.T) {
+	creds := &credentials.Value{
+		AccessKeyID:     "sts-access-key",
+		SecretAccessKey: "sts-secret-key",
+		SessionToken:    "sts-session-token",
+	}
+	cookie, err := auth.NewEncryptedTokenForClient(creds, "account-access-key", nil)
+	assert.NoError(t, err)
+	presigned := "http://other.example.com/bucket/object?X-Amz-Signature=presigned-signature"
+	sharedObject := base64.RawURLEncoding.EncodeToString([]byte(presigned))
+	stsQuery := "?sts=" + creds.SessionToken + "&sts_a=" + creds.AccessKeyID + "&sts_s=" + creds.SecretAccessKey
+
+	secrets := []string{
+		creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, cookie, sharedObject,
+		"basic-credentials", "access-token-claims", "number-sign-secret",
+	}
+	requests := func() []*http.Request {
+		// No handler behind these requests is reached, so nothing contacts MinIO: the first route
+		// does not exist, the second request fails authentication and the shared objects are
+		// refused because their URL does not point to MinIO.
+		withCookie := httptest.NewRequest(http.MethodGet, "/api/v1/no-such-route", nil)
+		withCookie.AddCookie(&http.Cookie{Name: "token", Value: cookie})
+		withAccessToken := httptest.NewRequest(http.MethodGet, "/api/v1/buckets?access_token=access-token-claims", nil)
+		withAccessToken.Header.Set("Authorization", "Basic basic-credentials")
+		return []*http.Request{
+			withCookie,
+			withAccessToken,
+			httptest.NewRequest(http.MethodGet, "/"+stsQuery, nil),
+			httptest.NewRequest(http.MethodGet, "/index.html"+stsQuery, nil),
+			httptest.NewRequest(http.MethodGet, "/?sts=s&sts_a=a&sts_s=#number-sign-secret", nil),
+			httptest.NewRequest(http.MethodGet, "/api/v1/download-shared-object/"+sharedObject, nil),
+			httptest.NewRequest(http.MethodGet, "/api/v1/download-shared-object/./"+sharedObject, nil),
+			httptest.NewRequest(http.MethodGet, "/api/v1/download-shared-object//"+sharedObject, nil),
+		}
+	}
+
+	for level, wanted := range map[string][]string{
+		"3": {"/index.html?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED", "/api/v1/download-shared-object/REDACTED"},
+		"6": {"Location: ./?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED\n", "Authorization: REDACTED\n", "Cookie: REDACTED\n", "Set-Cookie: REDACTED\n"},
+	} {
+		t.Run("Level "+level, func(t *testing.T) {
+			t.Setenv("CONSOLE_DEBUG_LOGLEVEL", level)
+			var logged []string
+			original := debugLogInfo
+			debugLogInfo = func(text string) { logged = append(logged, text) }
+			defer func() { debugLogInfo = original }()
+
+			spec, err := loads.Embedded(SwaggerJSON, FlatSwaggerJSON)
+			assert.NoError(t, err)
+			consoleAPI := operations.NewConsoleAPI(spec)
+			consoleAPI.Logger = func(string, ...interface{}) {}
+			handler := configureAPI(consoleAPI)
+			sent := requests()
+			for _, r := range sent {
+				handler.ServeHTTP(httptest.NewRecorder(), r)
+			}
+
+			assert.Len(t, logged, len(sent))
+			text := strings.Join(logged, "\n")
+			for _, secret := range secrets {
+				assert.NotContains(t, text, secret)
+			}
+			for _, want := range wanted {
+				assert.Contains(t, text, want)
+			}
+		})
+	}
 }

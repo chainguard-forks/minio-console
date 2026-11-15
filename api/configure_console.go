@@ -209,8 +209,13 @@ func debugLog(debugLogLevel int, r *http.Request, rw *logger.ResponseWriter) {
 	}
 }
 
+// debugLogInfo writes a text to the debug log. Tests replace it to read what is logged.
+var debugLogInfo = func(text string) {
+	logger.Info(text)
+}
+
 func debugLogSummary(r *http.Request, rw *logger.ResponseWriter) {
-	logger.Info(debugLogSummaryText(r, rw))
+	debugLogInfo(debugLogSummaryText(r, rw))
 }
 
 func debugLogSummaryText(r *http.Request, rw *logger.ResponseWriter) string {
@@ -222,7 +227,7 @@ func debugLogSummaryText(r *http.Request, rw *logger.ResponseWriter) string {
 }
 
 func debugLogDetails(r *http.Request, rw *logger.ResponseWriter) {
-	logger.Info(debugLogDetailsText(r, rw))
+	debugLogInfo(debugLogDetailsText(r, rw))
 }
 
 func debugLogDetailsText(r *http.Request, rw *logger.ResponseWriter) string {
@@ -279,6 +284,20 @@ var debugLogSecretHeaders = map[string]bool{
 	"X-Amz-Security-Token": true,
 }
 
+// debugLogURLHeaders are the headers whose values are URLs that can repeat the URL of a request:
+// the Referer of a request made by a page, the Location of the redirect from /index.html to /,
+// and the headers in which reverse proxies pass on the URL they received.
+var debugLogURLHeaders = map[string]bool{
+	"Content-Location":      true,
+	"Location":              true,
+	"Referer":               true,
+	"X-Envoy-Original-Path": true,
+	"X-Forwarded-Uri":       true,
+	"X-Original-Uri":        true,
+	"X-Original-Url":        true,
+	"X-Rewrite-Url":         true,
+}
+
 // debugLogSecretQueryParams are the query parameters whose values are credentials, in lower
 // case: the token that the API accepts in place of the Authorization header, the STS credentials
 // that handleSPA accepts, and the parameters of a presigned S3 request.
@@ -292,52 +311,79 @@ var debugLogSecretQueryParams = map[string]bool{
 	"x-amz-signature":      true,
 }
 
-// debugLogPair matches name=value where a URL has a query parameter: at the start of the text or
-// after "?", "&" or white space. The value ends at "&", "#" or white space.
-var debugLogPair = regexp.MustCompile(`(^|[?&\s])([^?&=#\s]+)=[^&#\s]*`)
+// debugLogSharedObjectRoute is the route of the link of a shared object. What follows it is a
+// presigned URL.
+const debugLogSharedObjectRoute = "api/v1/download-shared-object/"
 
-// debugLogSharedObject matches the link of a shared object, which ends in its presigned URL.
-var debugLogSharedObject = regexp.MustCompile(`(api/v1/download-shared-object/)[^/?&#\s]+`)
-
-// debugLogPassword matches the password in the user information of a URL.
-var debugLogPassword = regexp.MustCompile(`(://[^/?#\s:]*:)[^/?#\s]*@`)
-
-// debugLogText returns the text without the credentials that a URL in it may carry: the values
-// of the query parameters in debugLogSecretQueryParams, the presigned URL of a shared object and
-// a password.
-func debugLogText(text string) string {
-	text = debugLogPassword.ReplaceAllString(text, "${1}"+debugLogRedacted+"@")
-	text = debugLogSharedObject.ReplaceAllString(text, "${1}"+debugLogRedacted)
-	return debugLogPair.ReplaceAllStringFunc(text, func(pair string) string {
-		m := debugLogPair.FindStringSubmatch(pair)
-		if m == nil {
-			return pair
-		}
-		name, err := url.QueryUnescape(m[2])
-		if err != nil || !debugLogSecretQueryParams[strings.ToLower(name)] {
-			return pair
-		}
-		return m[1] + m[2] + "=" + debugLogRedacted
-	})
-}
-
-// debugLogURL returns the URL as the debug log may show it.
+// debugLogURL returns the URL without the credentials it may carry: a password, the values of
+// the query parameters in debugLogSecretQueryParams and the presigned URL of a shared object.
 func debugLogURL(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
-	return debugLogText(u.String())
+	redacted := *u
+	if _, hasPassword := u.User.Password(); hasPassword {
+		redacted.User = url.UserPassword(u.User.Username(), debugLogRedacted)
+	}
+	if redacted.RawQuery = debugLogQuery(u.RawQuery); redacted.RawQuery != u.RawQuery {
+		// The server keeps a "#" of the request line in the last value of the query, while
+		// url.Parse, which reads the URL of a header, makes a fragment of what follows it.
+		redacted.Fragment, redacted.RawFragment = "", ""
+	}
+	if escapedPath, found := debugLogSharedObject(u.EscapedPath()); found {
+		redacted.RawPath = escapedPath
+		redacted.Path, _ = url.PathUnescape(escapedPath)
+	}
+	if opaque, found := debugLogSharedObject(u.Opaque); found {
+		redacted.Opaque = opaque
+	}
+	return redacted.String()
 }
 
-// debugLogHeaderValue returns the value of a header as the debug log may show it. Headers other
-// than those in debugLogSecretHeaders can repeat the URL of a request and its credentials: the
-// Referer of a request made by a page, the Location of the redirect from /index.html to /, and
-// the headers in which a reverse proxy passes on the URL it received.
+// debugLogQuery splits the query as url.ParseQuery does and replaces the value of each parameter
+// in debugLogSecretQueryParams. A name that cannot be unescaped is taken for one of them.
+func debugLogQuery(rawQuery string) string {
+	pairs := strings.Split(rawQuery, "&")
+	for i, pair := range pairs {
+		key, _, hasValue := strings.Cut(pair, "=")
+		if !hasValue {
+			continue
+		}
+		if name, err := url.QueryUnescape(key); err != nil || debugLogSecretQueryParams[strings.ToLower(name)] {
+			pairs[i] = key + "=" + debugLogRedacted
+		}
+	}
+	return strings.Join(pairs, "&")
+}
+
+// debugLogSharedObject looks for the link of a shared object in an escaped path. The router
+// cleans the path before it matches a route, so the path is cleaned here as well. The result is
+// the cleaned path with debugLogRedacted in place of all that follows the route.
+func debugLogSharedObject(escapedPath string) (string, bool) {
+	cleaned := path.Clean(escapedPath)
+	i := strings.Index(cleaned, debugLogSharedObjectRoute)
+	if i < 0 {
+		return "", false
+	}
+	return cleaned[:i+len(debugLogSharedObjectRoute)] + debugLogRedacted, true
+}
+
+// debugLogHeaderValue returns the value of a header as the debug log may show it.
 func debugLogHeaderValue(key, value string) string {
-	if debugLogSecretHeaders[http.CanonicalHeaderKey(key)] {
+	key = http.CanonicalHeaderKey(key)
+	if debugLogSecretHeaders[key] {
 		return debugLogRedacted
 	}
-	return debugLogText(value)
+	if debugLogURLHeaders[key] {
+		u, err := url.Parse(value)
+		if err != nil {
+			return debugLogRedacted
+		}
+		if redacted := debugLogURL(u); redacted != u.String() {
+			return redacted
+		}
+	}
+	return value
 }
 
 // The middleware configuration happens before anything, this middleware also applies to serving the swagger.json document.
