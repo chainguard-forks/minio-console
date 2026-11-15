@@ -360,42 +360,48 @@ func debugLogURLText(text string) string {
 }
 
 // debugLogSharedObject replaces all that follows a segment named debugLogSharedObjectSegment in
-// the text of a URL, without its parameters. It reports false when a segment cannot be
-// unescaped.
+// the text of a URL, without its parameters. It reports false when a part of the text cannot be
+// unescaped, wherever that part is.
 //
 // It takes the text for segments between slashes and does not parse it, because one text can be
 // parsed in more than one way: the server reads "//download-shared-object/x" as a path, while a
-// URL parser reads a host and a path. It compares a segment after unescaping it, in any case,
-// and an escaped slash separates segments as a slash does.
+// URL parser reads a host and a path. An escaped slash separates segments as a slash does. A
+// segment is compared after unescaping it, in any case. The first segment of a URL without an
+// authority, such as "https:download-shared-object/x", follows the scheme and its colon.
 //
 // It does not ask whether the text holds the route of a shared object: the router cleans a path
 // before it matches a route, and a path that matches no route can still hold a presigned URL
 // that is valid.
 func debugLogSharedObject(head string) (string, bool) {
+	const escapedSlash = "%2F"
+	redacted, found := head, false
 	segments := strings.Split(head, "/")
 	for i, segment := range segments {
-		unescaped, err := url.PathUnescape(segment)
-		if err != nil {
-			return "", false
-		}
-		names := strings.Split(unescaped, "/")
-		for j, name := range names {
-			if !strings.EqualFold(name, debugLogSharedObjectSegment) {
-				continue
+		// The replacement keeps the length of the segment, so the lengths of the pieces tell
+		// where a piece ends in the segment as it was written.
+		pieces := strings.Split(strings.ReplaceAll(segment, "%2f", escapedSlash), escapedSlash)
+		end := 0
+		for j, piece := range pieces {
+			name, err := url.PathUnescape(piece)
+			if err != nil {
+				return "", false
 			}
-			rest := strings.Join(names[j+1:], "/") + "/" + strings.Join(segments[i+1:], "/")
-			if strings.Trim(rest, "/") == "" {
-				// Nothing follows the segment.
-				return head, true
+			end += len(piece)
+			if i == 0 && j == 0 {
+				if _, afterScheme, hasScheme := strings.Cut(name, ":"); hasScheme {
+					name = afterScheme
+				}
 			}
-			if j < len(names)-1 {
-				// The presigned URL begins in this segment, after an escaped slash.
-				segments[i] = debugLogSharedObjectSegment
+			rest := strings.Join(pieces[j+1:], "/") + "/" + strings.Join(segments[i+1:], "/")
+			if !found && strings.EqualFold(name, debugLogSharedObjectSegment) && strings.Trim(rest, "/") != "" {
+				kept := strings.Join(segments[:i+1], "/")
+				redacted = kept[:len(kept)-len(segment)+end] + "/" + debugLogRedacted
+				found = true
 			}
-			return strings.Join(segments[:i+1], "/") + "/" + debugLogRedacted, true
+			end += len(escapedSlash)
 		}
 	}
-	return head, true
+	return redacted, true
 }
 
 // debugLogParams replaces the value of each parameter in debugLogSecretQueryParams. It splits

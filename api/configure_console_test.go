@@ -211,6 +211,16 @@ func Test_debugLogURL(t *testing.T) {
 			want:   "/?x=1;sts_s=REDACTED&cp=y",
 		},
 		{
+			name:   "One of the names after a question mark in the value of another parameter",
+			target: "/?next=https://example.test/?sts=ready&cp=y",
+			want:   "/?next=https://example.test/?sts=REDACTED&cp=y",
+		},
+		{
+			name:   "Limit: a password in a URL that is the value of a parameter is not recognized",
+			target: "/?next=https://alice:password@minio.example/",
+			want:   "/?next=https://alice:password@minio.example/",
+		},
+		{
 			name:   "Token in place of the Authorization header",
 			target: "/api/v1/session?access_token=claims",
 			want:   "/api/v1/session?access_token=REDACTED",
@@ -274,6 +284,16 @@ func Test_debugLogURL(t *testing.T) {
 			want:   "/api/v1/download-shared-object/REDACTED",
 		},
 		{
+			name:   "Shared object in a path whose slashes are all escaped",
+			target: "/api%2Fv1%2fdownload-shared-object%2f" + token,
+			want:   "/api%2Fv1%2fdownload-shared-object/REDACTED",
+		},
+		{
+			name:   "Escaped slash after the segment and nothing else",
+			target: "/api/v1/download-shared-object%2F",
+			want:   "/api/v1/download-shared-object%2F",
+		},
+		{
 			name:   "Shared object after two slashes at the start of the path",
 			target: "//download-shared-object/" + token,
 			want:   "//download-shared-object/REDACTED",
@@ -328,6 +348,16 @@ func Test_debugLogURL(t *testing.T) {
 			name:   "Opaque URL",
 			target: "https:api/v1/download-shared-object/" + token + "?sts=session-token",
 			want:   "https:api/v1/download-shared-object/REDACTED?sts=REDACTED",
+		},
+		{
+			name:   "Opaque URL that begins with the segment",
+			target: "https:download-shared-object/" + token,
+			want:   "https:download-shared-object/REDACTED",
+		},
+		{
+			name:   "Opaque URL that begins with the segment, with an escaped character",
+			target: "https:Download-shared-objec%74/" + token + "?sts=session-token",
+			want:   "https:Download-shared-objec%74/REDACTED?sts=REDACTED",
 		},
 		{
 			name:   "Opaque URL with an escaped character in the segment",
@@ -439,6 +469,24 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			key:   "Referer",
 			value: "https://console.example.com/a%zz/download-shared-object/aHR0cDovL3NvbWV1cmw",
 			want:  "REDACTED",
+		},
+		{
+			name:  "Referer with a shared object whose presigned URL cannot be unescaped",
+			key:   "Referer",
+			value: "https://console.example.com/download-shared-object/%zz",
+			want:  "REDACTED",
+		},
+		{
+			name:  "Referer with a shared object in an opaque URL that begins with the segment",
+			key:   "Referer",
+			value: "https:download-shared-object/aHR0cDovL3NvbWV1cmw",
+			want:  "https:download-shared-object/REDACTED",
+		},
+		{
+			name:  "Limit: a header that is not in the list is not searched",
+			key:   "X-Custom-Url",
+			value: "https://alice:password@console.example.com/?sts=session-token",
+			want:  "https://alice:password@console.example.com/?sts=session-token",
 		},
 		{
 			name:  "Referer that is not a valid URL",
@@ -751,12 +799,15 @@ func Test_debugLog_websocket(t *testing.T) {
 	server := httptest.NewServer(configureAPI(consoleAPI))
 	defer server.Close()
 
+	// One limit for the whole exchange, so that a handshake that stalls fails the test.
+	const limit = 10 * time.Second
 	address := server.Listener.Addr().String()
-	conn, err := net.Dial("tcp", address)
+	conn, err := net.DialTimeout("tcp", address, limit)
 	if !assert.NoError(t, err) {
 		return
 	}
 	defer conn.Close()
+	assert.NoError(t, conn.SetDeadline(time.Now().Add(limit)))
 	_, err = fmt.Fprintf(conn, "GET /ws/none?sts_s=query-secret HTTP/1.1\r\nHost: %s\r\n"+
 		"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"+
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: token=%s\r\n\r\n", address, cookie)
@@ -774,7 +825,7 @@ func Test_debugLog_websocket(t *testing.T) {
 		for _, secret := range []string{creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, cookie, "query-secret"} {
 			assert.NotContains(t, text, secret)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(limit):
 		t.Fatal("the debug log did not record the request")
 	}
 }
