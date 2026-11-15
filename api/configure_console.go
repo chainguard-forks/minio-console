@@ -388,12 +388,11 @@ func debugLogSharedObject(head string) (string, bool) {
 				// Nothing follows the segment.
 				return head, true
 			}
-			kept := segments[:i+1]
 			if j < len(names)-1 {
 				// The presigned URL begins in this segment, after an escaped slash.
-				kept = append(segments[:i:i], debugLogSharedObjectSegment)
+				segments[i] = debugLogSharedObjectSegment
 			}
-			return strings.Join(kept, "/") + "/" + debugLogRedacted, true
+			return strings.Join(segments[:i+1], "/") + "/" + debugLogRedacted, true
 		}
 	}
 	return head, true
