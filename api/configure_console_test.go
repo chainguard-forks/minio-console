@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -384,6 +385,65 @@ func Test_debugLogURL(t *testing.T) {
 	assert.Equal(t, "", debugLogURL(nil))
 }
 
+// A request line can be as long as the server allows, and anyone can send one. The memory that
+// debugLogURLText allocates for it must grow with its length and not faster. The limit is far
+// above what these texts need and far below what work that grows with the square of their
+// length would take.
+func Test_debugLogURLText_longText(t *testing.T) {
+	const count = 100000
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "Slashes",
+			text: strings.Repeat("/", count),
+			want: strings.Repeat("/", count),
+		},
+		{
+			name: "Escaped slashes",
+			text: "/" + strings.Repeat("%2F", count),
+			want: "/" + strings.Repeat("%2F", count),
+		},
+		{
+			name: "Segment of a shared object followed by slashes only",
+			text: "/download-shared-object" + strings.Repeat("/", count),
+			want: "/download-shared-object" + strings.Repeat("/", count),
+		},
+		{
+			name: "Segment of a shared object, repeated",
+			text: strings.Repeat("/download-shared-object", count),
+			want: "/download-shared-object/REDACTED",
+		},
+		{
+			name: "Segment of a shared object after escaped slashes, repeated",
+			text: "/" + strings.Repeat("%2Fdownload-shared-object", count),
+			want: "/%2Fdownload-shared-object/REDACTED",
+		},
+		{
+			name: "Parameters",
+			text: "/?" + strings.Repeat("a=b&", count),
+			want: "/?" + strings.Repeat("a=b&", count),
+		},
+		{
+			name: "Separators in one parameter",
+			text: "/?a=b" + strings.Repeat(";", count) + "sts=session-token",
+			want: "/?a=b" + strings.Repeat(";", count) + "sts=REDACTED",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got := debugLogURLText(tt.text)
+			runtime.ReadMemStats(&after)
+			assert.True(t, tt.want == got, "unexpected text of %d bytes", len(got))
+			assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(256<<20))
+		})
+	}
+}
+
 func Test_debugLogHeaderValue(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -479,6 +539,12 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			name:  "Referer with a shared object whose presigned URL cannot be unescaped",
 			key:   "Referer",
 			value: "https://console.example.com/download-shared-object/%zz",
+			want:  "REDACTED",
+		},
+		{
+			name:  "Referer with a host that cannot be parsed, which would be one without what follows the segment",
+			key:   "Referer",
+			value: "https://download-shared-object%2Ftoken/path",
 			want:  "REDACTED",
 		},
 		{
@@ -828,15 +894,16 @@ func Test_debugLog_websocket(t *testing.T) {
 	server := httptest.NewServer(configureAPI(consoleAPI))
 	defer server.Close()
 
-	// One limit for the whole exchange, so that a handshake that stalls fails the test.
-	const limit = 10 * time.Second
+	// One deadline for the connection, the handshake and the wait for the log together, so that
+	// an exchange that stalls at any point fails the test.
+	deadline := time.Now().Add(10 * time.Second)
 	address := server.Listener.Addr().String()
-	conn, err := net.DialTimeout("tcp", address, limit)
+	conn, err := net.DialTimeout("tcp", address, time.Until(deadline))
 	if !assert.NoError(t, err) {
 		return
 	}
 	defer conn.Close()
-	assert.NoError(t, conn.SetDeadline(time.Now().Add(limit)))
+	assert.NoError(t, conn.SetDeadline(deadline))
 	_, err = fmt.Fprintf(conn, "GET /ws/none?sts_s=query-secret HTTP/1.1\r\nHost: %s\r\n"+
 		"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"+
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: token=%s\r\n\r\n", address, cookie)
@@ -854,7 +921,7 @@ func Test_debugLog_websocket(t *testing.T) {
 		for _, secret := range []string{creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, cookie, "query-secret"} {
 			assert.NotContains(t, text, secret)
 		}
-	case <-time.After(limit):
+	case <-time.After(time.Until(deadline)):
 		t.Fatal("the debug log did not record the request")
 	}
 }

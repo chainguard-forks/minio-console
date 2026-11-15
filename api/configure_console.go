@@ -338,20 +338,13 @@ func debugLogURL(u *url.URL) string {
 // path at the first "?" and takes all that follows for the query, while a URL parser ends the
 // path, and also the query, at a "#". Neither reading must show a credential. So the text up to
 // the first "?" is searched for a shared object, and all that follows the first "?" or "#" is
-// searched for parameters. What precedes both is parsed as a URL, only to find a password.
+// searched for parameters. What precedes both is parsed as a URL, to find a password.
+//
+// A text that cannot be parsed or unescaped is not shown at all. It is parsed as it was
+// received, before anything in it is replaced.
 func debugLogURLText(text string) string {
-	path, query := text, ""
-	if i := strings.IndexByte(text, '?'); i >= 0 {
-		path, query = text[:i], text[i:]
-	}
-	path, ok := debugLogSharedObject(path)
-	if !ok {
-		return debugLogRedacted
-	}
-	head, fragment := path, ""
-	if i := strings.IndexByte(path, '#'); i >= 0 {
-		head, fragment = path[:i], path[i:]
-	}
+	path, query := debugLogCut(text, '?')
+	head, fragment := debugLogCut(path, '#')
 	u, err := url.Parse(head)
 	if err != nil {
 		return debugLogRedacted
@@ -360,7 +353,20 @@ func debugLogURLText(text string) string {
 		u.User = url.UserPassword(u.User.Username(), debugLogRedacted)
 		head = u.String()
 	}
+	path, ok := debugLogSharedObject(head + fragment)
+	if !ok {
+		return debugLogRedacted
+	}
+	head, fragment = debugLogCut(path, '#')
 	return head + debugLogParams(fragment+query)
+}
+
+// debugLogCut returns the text before the first separator, and the rest with the separator.
+func debugLogCut(text string, separator byte) (string, string) {
+	if i := strings.IndexByte(text, separator); i >= 0 {
+		return text[:i], text[i:]
+	}
+	return text, ""
 }
 
 // debugLogSharedObject replaces all that follows a segment named debugLogSharedObjectSegment in
@@ -376,10 +382,15 @@ func debugLogURLText(text string) string {
 // It does not ask whether the text holds the route of a shared object: the router cleans a path
 // before it matches a route, and a path that matches no route can still hold a presigned URL
 // that is valid.
+//
+// Anyone can send a request line as long as the server allows, so the work must grow with the
+// length of the text and not faster: what follows a segment is looked at only when the segment
+// has the name, which happens once.
 func debugLogSharedObject(text string) (string, bool) {
 	const escapedSlash = "%2F"
 	redacted, found := text, false
 	segments := strings.Split(text, "/")
+	offset := 0 // where the segment begins in the text
 	for i, segment := range segments {
 		// The replacement keeps the length of the segment, so the lengths of the pieces tell
 		// where a piece ends in the segment as it was written.
@@ -396,16 +407,27 @@ func debugLogSharedObject(text string) (string, bool) {
 					name = afterScheme
 				}
 			}
-			rest := strings.Join(pieces[j+1:], "/") + "/" + strings.Join(segments[i+1:], "/")
-			if !found && strings.EqualFold(name, debugLogSharedObjectSegment) && strings.Trim(rest, "/") != "" {
-				kept := strings.Join(segments[:i+1], "/")
-				redacted = kept[:len(kept)-len(segment)+end] + "/" + debugLogRedacted
+			if !found && strings.EqualFold(name, debugLogSharedObjectSegment) && debugLogAnyText(pieces[j+1:], segments[i+1:]) {
+				redacted = text[:offset+end] + "/" + debugLogRedacted
 				found = true
 			}
 			end += len(escapedSlash)
 		}
+		offset += len(segment) + len("/")
 	}
 	return redacted, true
+}
+
+// debugLogAnyText reports whether one of the texts is not empty.
+func debugLogAnyText(lists ...[]string) bool {
+	for _, list := range lists {
+		for _, text := range list {
+			if text != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // debugLogParams replaces the value of each parameter in debugLogSecretQueryParams. It splits
