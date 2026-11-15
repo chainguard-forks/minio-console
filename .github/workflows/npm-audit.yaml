@@ -1,0 +1,47 @@
+# @format
+
+# The result of this job depends only on the dependencies of the web app and
+# on the advisory database, so it runs only on pull requests that change them.
+# The Dependabot alerts of the repository report the same packages at all times.
+
+name: Vulnerability Check (web app)
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - web-app/package.json
+      - web-app/yarn.lock
+
+permissions:
+  contents: read # to fetch code (actions/checkout)
+
+jobs:
+  react-code-known-vulnerabilities:
+    name: "React Code Has No Known Vulnerable Deps"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [ 1.26.x ]
+        os: [ ubuntu-latest ]
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - name: Check out code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Read .nvmrc
+        id: node_version
+        run: echo "$(cat .nvmrc)" && echo "NVMRC=$(cat .nvmrc)" >> $GITHUB_ENV
+      - name: Enable Corepack
+        run: corepack enable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NVMRC }}
+      - name: Checks for known security issues with the installed packages
+        working-directory: ./web-app
+        continue-on-error: false
+        run: |
+          yarn npm audit --recursive --environment production --no-deprecations
