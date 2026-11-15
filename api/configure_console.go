@@ -209,9 +209,10 @@ func debugLog(debugLogLevel int, r *http.Request, rw *logger.ResponseWriter) {
 	}
 }
 
-// debugLogInfo writes a text to the debug log. Tests replace it to read what is logged.
+// debugLogInfo writes a text to the debug log. Tests replace it to read what is logged. The text
+// is an argument of the logger and not its format, so that a "%" in a URL is logged as it is.
 var debugLogInfo = func(text string) {
-	logger.Info(text)
+	logger.Info("%s", text)
 }
 
 func debugLogSummary(r *http.Request, rw *logger.ResponseWriter) {

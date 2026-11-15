@@ -18,6 +18,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"math"
@@ -31,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/go-openapi/loads"
 	"github.com/minio/console/api/operations"
 	"github.com/minio/console/pkg/auth"
@@ -417,10 +419,15 @@ func Test_debugLogURL(t *testing.T) {
 // with the square of the length for the first five of these texts, which is sixteen times as
 // much.
 //
-// The test measures memory and not time, so it does not notice work that allocates nothing. The
-// counter it reads belongs to the whole process, so each measurement is the smallest of three,
-// to keep out what another goroutine may allocate in the meantime.
+// The test measures memory and not time, so it does not notice work that allocates nothing.
+//
+// The counter it reads belongs to the whole process. The test therefore runs on one processor,
+// as testing.AllocsPerRun does: no other goroutine runs while a text is measured, unless the
+// scheduler interrupts the measurement, which takes about a millisecond. Each measurement is
+// the smallest of three, against such an interruption. What another goroutine allocates during
+// all three would still be counted.
 func Test_debugLogURLText_longText(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	const marker = "download-shared-object"
 	tests := []struct {
 		name string
@@ -703,6 +710,27 @@ func Test_debugLogHeaders(t *testing.T) {
 		indent + "Set-Cookie: REDACTED\n" +
 		indent + "Set-Cookie: REDACTED\n"
 	assert.Equal(t, want, sb.String())
+}
+
+// The logger formats what it is given. A "%" in a URL must reach the output of the logger as it
+// is, in the summary and in the details. The other tests replace debugLogInfo and do not see
+// what the logger makes of a text; this one reads the output of the logger.
+func Test_debugLog_output(t *testing.T) {
+	var output bytes.Buffer
+	original := color.Output
+	color.Output = &output
+	defer func() { color.Output = original }()
+
+	r := httptest.NewRequest(http.MethodGet, "/browser/a%2Fb?prefix=c%2Fd&format=%s%d&sts=session-token", nil)
+	r.Header.Set("Referer", "https://console.example.com/browser/a%2Fb")
+	rw := logger.NewResponseWriter(httptest.NewRecorder())
+	debugLogSummary(r, rw)
+	debugLogDetails(r, rw)
+
+	text := output.String()
+	assert.Equal(t, 2, strings.Count(text, " /browser/a%2Fb?prefix=c%2Fd&format=%s%d&sts=REDACTED"))
+	assert.Contains(t, text, "Referer: https://console.example.com/browser/a%2Fb\n")
+	assert.NotContains(t, text, "session-token")
 }
 
 // AuthenticationMiddleware adds the decrypted session token to the request as its Authorization
