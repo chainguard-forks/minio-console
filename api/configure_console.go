@@ -334,19 +334,23 @@ func debugLogURL(u *url.URL) string {
 // the presigned URL of a shared object and the values of the parameters in
 // debugLogSecretQueryParams.
 //
-// A request line, and a header that repeats it, can be read in two ways: the server takes all
-// that follows the first "?" for the query, while a URL parser ends the query at a "#". Either
-// reading must not show a credential, so all that follows the first "?" or "#" is searched for
-// parameters. What precedes it is searched for a shared object as text, and parsed as a URL
-// only to find a password.
+// A request line, and a header that repeats it, can be read in two ways: the server ends the
+// path at the first "?" and takes all that follows for the query, while a URL parser ends the
+// path, and also the query, at a "#". Neither reading must show a credential. So the text up to
+// the first "?" is searched for a shared object, and all that follows the first "?" or "#" is
+// searched for parameters. What precedes both is parsed as a URL, only to find a password.
 func debugLogURLText(text string) string {
-	head, params := text, ""
-	if i := strings.IndexAny(text, "?#"); i >= 0 {
-		head, params = text[:i], text[i:]
+	path, query := text, ""
+	if i := strings.IndexByte(text, '?'); i >= 0 {
+		path, query = text[:i], text[i:]
 	}
-	head, ok := debugLogSharedObject(head)
+	path, ok := debugLogSharedObject(path)
 	if !ok {
 		return debugLogRedacted
+	}
+	head, fragment := path, ""
+	if i := strings.IndexByte(path, '#'); i >= 0 {
+		head, fragment = path[:i], path[i:]
 	}
 	u, err := url.Parse(head)
 	if err != nil {
@@ -356,11 +360,11 @@ func debugLogURLText(text string) string {
 		u.User = url.UserPassword(u.User.Username(), debugLogRedacted)
 		head = u.String()
 	}
-	return head + debugLogParams(params)
+	return head + debugLogParams(fragment+query)
 }
 
 // debugLogSharedObject replaces all that follows a segment named debugLogSharedObjectSegment in
-// the text of a URL, without its parameters. It reports false when a part of the text cannot be
+// the text of a URL, without its query. It reports false when a part of the text cannot be
 // unescaped, wherever that part is.
 //
 // It takes the text for segments between slashes and does not parse it, because one text can be
@@ -372,10 +376,10 @@ func debugLogURLText(text string) string {
 // It does not ask whether the text holds the route of a shared object: the router cleans a path
 // before it matches a route, and a path that matches no route can still hold a presigned URL
 // that is valid.
-func debugLogSharedObject(head string) (string, bool) {
+func debugLogSharedObject(text string) (string, bool) {
 	const escapedSlash = "%2F"
-	redacted, found := head, false
-	segments := strings.Split(head, "/")
+	redacted, found := text, false
+	segments := strings.Split(text, "/")
 	for i, segment := range segments {
 		// The replacement keeps the length of the segment, so the lengths of the pieces tell
 		// where a piece ends in the segment as it was written.

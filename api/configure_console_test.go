@@ -279,6 +279,11 @@ func Test_debugLogURL(t *testing.T) {
 			want:   "/api/v1/download-shared-objec%74/REDACTED",
 		},
 		{
+			name:   "Shared object with a number sign in its presigned URL",
+			target: "/api/v1/download-shared-object/aHR0c#DovL3NvbWV1cmw",
+			want:   "/api/v1/download-shared-object/REDACTED",
+		},
+		{
 			name:   "Shared object after an escaped slash",
 			target: "/api/v1/download-shared-object%2F" + token,
 			want:   "/api/v1/download-shared-object/REDACTED",
@@ -517,6 +522,30 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			key:   "X-Original-URI",
 			value: "/console/?sts=session-token&sts_a=access-key&sts_s=#secret-key",
 			want:  "/console/?sts=REDACTED&sts_a=REDACTED&sts_s=REDACTED",
+		},
+		{
+			name:  "Request line passed on by a reverse proxy, with a number sign in the presigned URL of a shared object",
+			key:   "X-Original-URI",
+			value: "/api/v1/download-shared-object/aHR0c#DovL3NvbWV1cmw",
+			want:  "/api/v1/download-shared-object/REDACTED",
+		},
+		{
+			name:  "Request line passed on by a reverse proxy, with a shared object after a number sign",
+			key:   "X-Original-URI",
+			value: "/console#/api/v1/download-shared-object/aHR0cDovL3NvbWV1cmw?sts=session-token",
+			want:  "/console#/api/v1/download-shared-object/REDACTED?sts=REDACTED",
+		},
+		{
+			name:  "Referer with a fragment that cannot be unescaped",
+			key:   "Referer",
+			value: "https://console.example.com/browser#50%",
+			want:  "REDACTED",
+		},
+		{
+			name:  "Referer with a query that cannot be unescaped",
+			key:   "Referer",
+			value: "https://console.example.com/browser?discount=50%&sts=session-token",
+			want:  "https://console.example.com/browser?discount=50%&sts=REDACTED",
 		},
 		{
 			name:  "URL with a port in a header that is not in the list",
