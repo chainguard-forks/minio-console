@@ -386,9 +386,11 @@ func Test_debugLogURL(t *testing.T) {
 }
 
 // A request line can be as long as the server allows, and anyone can send one. The memory that
-// debugLogURLText allocates for it must grow with its length and not faster. The limit is far
-// above what these texts need and far below what work that grows with the square of their
-// length would take.
+// debugLogURLText allocates for it must grow with its length and not faster. These texts need
+// less than 4 MB each. Work that grows with the square of their length, as an earlier version
+// did for the first five, allocated more than 10 GB. The limit lies between the two.
+//
+// The test measures memory and not time, so it does not notice work that allocates nothing.
 func Test_debugLogURLText_longText(t *testing.T) {
 	const count = 100000
 	tests := []struct {
