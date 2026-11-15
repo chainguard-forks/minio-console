@@ -28,6 +28,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -213,12 +214,12 @@ func debugLogSummary(r *http.Request, rw *logger.ResponseWriter) {
 	if rw.Hijacked {
 		statusCode = "hijacked"
 	}
-	logger.Info(fmt.Sprintf("%s %s %s %s %dms", r.RemoteAddr, r.Method, r.URL, statusCode, time.Since(rw.StartTime).Milliseconds()))
+	logger.Info(fmt.Sprintf("%s %s %s %s %dms", r.RemoteAddr, r.Method, debugLogURL(r.URL), statusCode, time.Since(rw.StartTime).Milliseconds()))
 }
 
 func debugLogDetails(r *http.Request, rw *logger.ResponseWriter) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("- Method/URL:       %s %s\n", r.Method, r.URL))
+	sb.WriteString(fmt.Sprintf("- Method/URL:       %s %s\n", r.Method, debugLogURL(r.URL)))
 	sb.WriteString(fmt.Sprintf("  Remote endpoint:  %s\n", r.RemoteAddr))
 	if rw.Hijacked {
 		sb.WriteString("  Status code:      <hijacked, probably a websocket>\n")
@@ -248,12 +249,84 @@ func debugLogHeaders(sb *strings.Builder, h http.Header) {
 			} else {
 				first = false
 			}
-			sb.WriteString(fmt.Sprintf("%s: %s\n", key, value))
+			sb.WriteString(fmt.Sprintf("%s: %s\n", key, debugLogHeaderValue(key, value)))
 		}
 	}
 	if first {
 		sb.WriteRune('\n')
 	}
+}
+
+// debugLogRedacted is what the debug log shows in place of a credential.
+const debugLogRedacted = "REDACTED"
+
+// debugLogSecretHeaders are the headers whose values are credentials. AuthenticationMiddleware
+// runs inside DebugLogMiddleware and puts the decrypted session token, which holds the STS
+// credentials of the user, into the Authorization header of the request.
+var debugLogSecretHeaders = map[string]bool{
+	"Authorization":       true,
+	"Cookie":              true,
+	"Proxy-Authorization": true,
+	"Set-Cookie":          true,
+}
+
+// debugLogSecretQueryParams are the query parameters whose values are credentials: the STS
+// credentials that handleSPA accepts.
+var debugLogSecretQueryParams = map[string]bool{
+	"sts":   true,
+	"sts_a": true,
+	"sts_s": true,
+}
+
+// debugLogSharedObjectPath precedes the presigned URL in the link of a shared object.
+const debugLogSharedObjectPath = "/download-shared-object/"
+
+// debugLogURL returns the URL without the credentials it may carry: the values of the query
+// parameters in debugLogSecretQueryParams and the presigned URL of a shared object.
+func debugLogURL(u *url.URL) string {
+	redacted := *u
+	redacted.RawQuery = debugLogQuery(u.RawQuery)
+	if i := strings.Index(u.Path, debugLogSharedObjectPath); i >= 0 {
+		redacted.Path = u.Path[:i+len(debugLogSharedObjectPath)] + debugLogRedacted
+		redacted.RawPath = ""
+	}
+	return redacted.String()
+}
+
+func debugLogQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	pairs := strings.Split(rawQuery, "&")
+	for i, pair := range pairs {
+		key, _, hasValue := strings.Cut(pair, "=")
+		if !hasValue {
+			continue
+		}
+		if name, err := url.QueryUnescape(key); err == nil && debugLogSecretQueryParams[name] {
+			pairs[i] = key + "=" + debugLogRedacted
+		}
+	}
+	return strings.Join(pairs, "&")
+}
+
+// debugLogHeaderValue returns the value of a header as the debug log may show it. The Referer
+// of a request made by a page that was opened with credentials in its URL repeats that URL.
+func debugLogHeaderValue(key, value string) string {
+	key = http.CanonicalHeaderKey(key)
+	if debugLogSecretHeaders[key] {
+		return debugLogRedacted
+	}
+	if key == "Referer" {
+		u, err := url.Parse(value)
+		if err != nil {
+			return debugLogRedacted
+		}
+		if redacted := debugLogURL(u); redacted != u.String() {
+			return redacted
+		}
+	}
+	return value
 }
 
 // The middleware configuration happens before anything, this middleware also applies to serving the swagger.json document.

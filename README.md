@@ -213,6 +213,11 @@ the `CONSOLE_DEBUG_LOGLEVEL` environment variable to one of the following values
  - Duration of the request
 
 The detailed logging also includes all request and response headers (if any).
+
+Credentials are not logged. `REDACTED` replaces the values of the `Authorization`, `Cookie`,
+`Proxy-Authorization` and `Set-Cookie` headers, the values of the query parameters `sts`, `sts_a`
+and `sts_s` (also where the `Referer` header repeats them), and the presigned URL in the link of a
+shared object.
  
 # Contribute to console Project
 
