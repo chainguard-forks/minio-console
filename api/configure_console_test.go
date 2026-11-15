@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -170,6 +171,31 @@ func Test_debugLogURL(t *testing.T) {
 			name:   "Parameter name that cannot be unescaped",
 			target: "/?st%zzs=session-token&cp=y",
 			want:   "/?st%zzs=REDACTED&cp=y",
+		},
+		{
+			name:   "Name that cannot be unescaped and holds a question mark",
+			target: "/?bad%zz?name=value&cp=y",
+			want:   "/?bad%zz?name=REDACTED&cp=y",
+		},
+		{
+			name:   "Name that cannot be unescaped and holds a number sign",
+			target: "/?bad%zz#name=value&cp=y",
+			want:   "/?bad%zz#name=REDACTED&cp=y",
+		},
+		{
+			name:   "Name that cannot be unescaped and holds a semicolon, after another parameter",
+			target: "/?a=b;bad%zz;name=value&cp=y",
+			want:   "/?a=b;bad%zz;name=REDACTED&cp=y",
+		},
+		{
+			name:   "Value that cannot be unescaped, before another parameter",
+			target: "/?a=%zz;name=value&cp=y",
+			want:   "/?a=%zz;name=value&cp=y",
+		},
+		{
+			name:   "Text that cannot be unescaped, without a value",
+			target: "/?bad%zz&cp=y",
+			want:   "/?bad%zz&cp=y",
 		},
 		{
 			name:   "Repeated parameter",
@@ -386,62 +412,74 @@ func Test_debugLogURL(t *testing.T) {
 }
 
 // A request line can be as long as the server allows, and anyone can send one. The memory that
-// debugLogURLText allocates for it must grow with its length and not faster. These texts need
-// less than 4 MB each. Work that grows with the square of their length, as an earlier version
-// did for the first five, allocated more than 10 GB. The limit lies between the two.
+// debugLogURLText allocates for a text must grow with its length and not faster: for a text four
+// times as long, it must stay under eight times as much. An earlier version did work that grew
+// with the square of the length for the first five of these texts, which is sixteen times as
+// much.
 //
-// The test measures memory and not time, so it does not notice work that allocates nothing.
+// The test measures memory and not time, so it does not notice work that allocates nothing. The
+// counter it reads belongs to the whole process, so each measurement is the smallest of three,
+// to keep out what another goroutine may allocate in the meantime.
 func Test_debugLogURLText_longText(t *testing.T) {
-	const count = 100000
+	const marker = "download-shared-object"
 	tests := []struct {
 		name string
-		text string
-		want string
+		text func(count int) string
+		want func(count int) string
 	}{
 		{
 			name: "Slashes",
-			text: strings.Repeat("/", count),
-			want: strings.Repeat("/", count),
+			text: func(count int) string { return strings.Repeat("/", count) },
+			want: func(count int) string { return strings.Repeat("/", count) },
 		},
 		{
 			name: "Escaped slashes",
-			text: "/" + strings.Repeat("%2F", count),
-			want: "/" + strings.Repeat("%2F", count),
+			text: func(count int) string { return "/" + strings.Repeat("%2F", count) },
+			want: func(count int) string { return "/" + strings.Repeat("%2F", count) },
 		},
 		{
 			name: "Segment of a shared object followed by slashes only",
-			text: "/download-shared-object" + strings.Repeat("/", count),
-			want: "/download-shared-object" + strings.Repeat("/", count),
+			text: func(count int) string { return "/" + marker + strings.Repeat("/", count) },
+			want: func(count int) string { return "/" + marker + strings.Repeat("/", count) },
 		},
 		{
 			name: "Segment of a shared object, repeated",
-			text: strings.Repeat("/download-shared-object", count),
-			want: "/download-shared-object/REDACTED",
+			text: func(count int) string { return strings.Repeat("/"+marker, count) },
+			want: func(int) string { return "/" + marker + "/REDACTED" },
 		},
 		{
 			name: "Segment of a shared object after escaped slashes, repeated",
-			text: "/" + strings.Repeat("%2Fdownload-shared-object", count),
-			want: "/%2Fdownload-shared-object/REDACTED",
+			text: func(count int) string { return "/" + strings.Repeat("%2F"+marker, count) },
+			want: func(int) string { return "/%2F" + marker + "/REDACTED" },
 		},
 		{
 			name: "Parameters",
-			text: "/?" + strings.Repeat("a=b&", count),
-			want: "/?" + strings.Repeat("a=b&", count),
+			text: func(count int) string { return "/?" + strings.Repeat("a=b&", count) },
+			want: func(count int) string { return "/?" + strings.Repeat("a=b&", count) },
 		},
 		{
 			name: "Separators in one parameter",
-			text: "/?a=b" + strings.Repeat(";", count) + "sts=session-token",
-			want: "/?a=b" + strings.Repeat(";", count) + "sts=REDACTED",
+			text: func(count int) string { return "/?a=b" + strings.Repeat(";", count) + "sts=session-token" },
+			want: func(count int) string { return "/?a=b" + strings.Repeat(";", count) + "sts=REDACTED" },
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	allocated := func(text string) uint64 {
+		smallest := uint64(math.MaxUint64)
+		for range 3 {
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
-			got := debugLogURLText(tt.text)
+			debugLogURLText(text)
 			runtime.ReadMemStats(&after)
-			assert.True(t, tt.want == got, "unexpected text of %d bytes", len(got))
-			assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(256<<20))
+			smallest = min(smallest, after.TotalAlloc-before.TotalAlloc)
+		}
+		return smallest
+	}
+	const count = 5000
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			long := tt.text(4 * count)
+			assert.True(t, tt.want(4*count) == debugLogURLText(long), "unexpected text for %d separators", 4*count)
+			assert.Less(t, allocated(long), 8*allocated(tt.text(count)))
 		})
 	}
 }
@@ -548,6 +586,24 @@ func Test_debugLogHeaderValue(t *testing.T) {
 			key:   "Referer",
 			value: "https://download-shared-object%2Ftoken/path",
 			want:  "REDACTED",
+		},
+		{
+			name:  "Referer without a scheme whose first segment holds an escaped colon before the name",
+			key:   "Referer",
+			value: "folder%3Adownload-shared-object/manual.pdf",
+			want:  "folder%3Adownload-shared-object/manual.pdf",
+		},
+		{
+			name:  "Request line passed on by a reverse proxy, with a colon before the name after a number sign",
+			key:   "X-Original-URI",
+			value: "x#a:download-shared-object/manual.pdf",
+			want:  "x#a:download-shared-object/manual.pdf",
+		},
+		{
+			name:  "Referer with a shared object in an opaque URL that begins with the segment, scheme in upper case",
+			key:   "Referer",
+			value: "HTTPS:download-shared-object/aHR0cDovL3NvbWV1cmw",
+			want:  "HTTPS:download-shared-object/REDACTED",
 		},
 		{
 			name:  "Referer with a shared object in an opaque URL that begins with the segment",

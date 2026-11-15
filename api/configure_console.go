@@ -353,7 +353,11 @@ func debugLogURLText(text string) string {
 		u.User = url.UserPassword(u.User.Username(), debugLogRedacted)
 		head = u.String()
 	}
-	path, ok := debugLogSharedObject(head + fragment)
+	scheme := 0 // the length of the scheme and its colon
+	if u.Scheme != "" {
+		scheme = len(u.Scheme) + len(":")
+	}
+	path, ok := debugLogSharedObject(head+fragment, scheme)
 	if !ok {
 		return debugLogRedacted
 	}
@@ -377,7 +381,8 @@ func debugLogCut(text string, separator byte) (string, string) {
 // parsed in more than one way: the server reads "//download-shared-object/x" as a path, while a
 // URL parser reads a host and a path. An escaped slash separates segments as a slash does. A
 // segment is compared after unescaping it, in any case. The first segment of a URL without an
-// authority, such as "https:download-shared-object/x", follows the scheme and its colon.
+// authority, such as "https:download-shared-object/x", follows the scheme and its colon, whose
+// length the caller gives.
 //
 // It does not ask whether the text holds the route of a shared object: the router cleans a path
 // before it matches a route, and a path that matches no route can still hold a presigned URL
@@ -386,7 +391,7 @@ func debugLogCut(text string, separator byte) (string, string) {
 // Anyone can send a request line as long as the server allows, so the work must grow with the
 // length of the text and not faster: what follows a segment is looked at only when the segment
 // has the name, which happens once.
-func debugLogSharedObject(text string) (string, bool) {
+func debugLogSharedObject(text string, scheme int) (string, bool) {
 	const escapedSlash = "%2F"
 	redacted, found := text, false
 	segments := strings.Split(text, "/")
@@ -397,16 +402,16 @@ func debugLogSharedObject(text string) (string, bool) {
 		pieces := strings.Split(strings.ReplaceAll(segment, "%2f", escapedSlash), escapedSlash)
 		end := 0
 		for j, piece := range pieces {
-			name, err := url.PathUnescape(piece)
+			escaped := piece
+			if i == 0 && j == 0 && scheme <= len(piece) {
+				// A scheme holds nothing that is escaped.
+				escaped = piece[scheme:]
+			}
+			name, err := url.PathUnescape(escaped)
 			if err != nil {
 				return "", false
 			}
 			end += len(piece)
-			if i == 0 && j == 0 {
-				if _, afterScheme, hasScheme := strings.Cut(name, ":"); hasScheme {
-					name = afterScheme
-				}
-			}
 			if !found && strings.EqualFold(name, debugLogSharedObjectSegment) && debugLogAnyText(pieces[j+1:], segments[i+1:]) {
 				redacted = text[:offset+end] + "/" + debugLogRedacted
 				found = true
@@ -431,30 +436,43 @@ func debugLogAnyText(lists ...[]string) bool {
 }
 
 // debugLogParams replaces the value of each parameter in debugLogSecretQueryParams. It splits
-// the text at "&" as url.ParseQuery does. In each part it also looks for a name after a ";", a
-// "?" or a "#": ParseQuery does not find a parameter there, but the part is logged all the same.
-// The value of a parameter ends where its part ends.
+// the text at "&" as url.ParseQuery does.
 func debugLogParams(params string) string {
 	parts := strings.Split(params, "&")
 	for i, part := range parts {
-		start := 0
-		for {
-			piece := part[start:]
-			end := strings.IndexAny(piece, ";?#")
-			if end >= 0 {
-				piece = piece[:end]
-			}
-			if key, _, hasValue := strings.Cut(piece, "="); hasValue && debugLogSecretName(key) {
-				parts[i] = part[:start+len(key)] + "=" + debugLogRedacted
-				break
-			}
-			if end < 0 {
-				break
-			}
-			start += end + 1
-		}
+		parts[i] = debugLogParam(part)
 	}
 	return strings.Join(parts, "&")
+}
+
+// debugLogParam replaces the value of the parameter in one part of a query, if its name is in
+// debugLogSecretQueryParams or cannot be unescaped. The value ends where the part ends.
+//
+// url.ParseQuery takes the text before the first "=" for the name. A name can also begin after
+// a ";", a "?" or a "#" in the part: ParseQuery does not find a parameter there, but the part is
+// logged all the same. So the part is read in pieces between these separators. A piece without
+// a "=" that cannot be unescaped makes every name that holds it one that cannot be unescaped,
+// up to the next "=".
+func debugLogParam(part string) string {
+	malformed := false
+	for start := 0; ; {
+		piece := part[start:]
+		end := strings.IndexAny(piece, ";?#")
+		if end >= 0 {
+			piece = piece[:end]
+		}
+		if key, _, hasValue := strings.Cut(piece, "="); hasValue {
+			if malformed || debugLogSecretName(key) {
+				return part[:start+len(key)] + "=" + debugLogRedacted
+			}
+		} else if _, err := url.QueryUnescape(piece); err != nil {
+			malformed = true
+		}
+		if end < 0 {
+			return part
+		}
+		start += end + 1
+	}
 }
 
 // debugLogSecretName reports whether the escaped name of a parameter is in
