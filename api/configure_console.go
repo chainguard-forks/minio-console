@@ -28,6 +28,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -208,17 +209,31 @@ func debugLog(debugLogLevel int, r *http.Request, rw *logger.ResponseWriter) {
 	}
 }
 
+// debugLogInfo writes a text to the debug log. Tests replace it to read what is logged. The text
+// is an argument of the logger and not its format, so that a "%" in a URL is logged as it is.
+var debugLogInfo = func(text string) {
+	logger.Info("%s", text)
+}
+
 func debugLogSummary(r *http.Request, rw *logger.ResponseWriter) {
+	debugLogInfo(debugLogSummaryText(r, rw))
+}
+
+func debugLogSummaryText(r *http.Request, rw *logger.ResponseWriter) string {
 	statusCode := strconv.Itoa(rw.StatusCode)
 	if rw.Hijacked {
 		statusCode = "hijacked"
 	}
-	logger.Info(fmt.Sprintf("%s %s %s %s %dms", r.RemoteAddr, r.Method, r.URL, statusCode, time.Since(rw.StartTime).Milliseconds()))
+	return fmt.Sprintf("%s %s %s %s %dms", r.RemoteAddr, r.Method, debugLogURL(r.URL), statusCode, time.Since(rw.StartTime).Milliseconds())
 }
 
 func debugLogDetails(r *http.Request, rw *logger.ResponseWriter) {
+	debugLogInfo(debugLogDetailsText(r, rw))
+}
+
+func debugLogDetailsText(r *http.Request, rw *logger.ResponseWriter) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("- Method/URL:       %s %s\n", r.Method, r.URL))
+	sb.WriteString(fmt.Sprintf("- Method/URL:       %s %s\n", r.Method, debugLogURL(r.URL)))
 	sb.WriteString(fmt.Sprintf("  Remote endpoint:  %s\n", r.RemoteAddr))
 	if rw.Hijacked {
 		sb.WriteString("  Status code:      <hijacked, probably a websocket>\n")
@@ -230,7 +245,7 @@ func debugLogDetails(r *http.Request, rw *logger.ResponseWriter) {
 	debugLogHeaders(&sb, r.Header)
 	sb.WriteString("  Response headers: ")
 	debugLogHeaders(&sb, rw.Header())
-	logger.Info(sb.String())
+	return sb.String()
 }
 
 func debugLogHeaders(sb *strings.Builder, h http.Header) {
@@ -248,12 +263,236 @@ func debugLogHeaders(sb *strings.Builder, h http.Header) {
 			} else {
 				first = false
 			}
-			sb.WriteString(fmt.Sprintf("%s: %s\n", key, value))
+			sb.WriteString(fmt.Sprintf("%s: %s\n", key, debugLogHeaderValue(key, value)))
 		}
 	}
 	if first {
 		sb.WriteRune('\n')
 	}
+}
+
+// debugLogRedacted is what the debug log shows in place of a credential.
+const debugLogRedacted = "REDACTED"
+
+// debugLogSecretHeaders are the headers whose values are credentials. AuthenticationMiddleware
+// runs inside DebugLogMiddleware and puts the decrypted session token, which holds the STS
+// credentials of the user, into the Authorization header of the request.
+var debugLogSecretHeaders = map[string]bool{
+	"Authorization":        true,
+	"Cookie":               true,
+	"Proxy-Authorization":  true,
+	"Set-Cookie":           true,
+	"X-Amz-Security-Token": true,
+}
+
+// debugLogURLHeaders are the headers whose values are URLs that can repeat the URL of a request:
+// the Referer of a request made by a page, the Location of the redirect from /index.html to /,
+// and the headers in which reverse proxies pass on the URL they received.
+var debugLogURLHeaders = map[string]bool{
+	"Content-Location":      true,
+	"Location":              true,
+	"Referer":               true,
+	"X-Envoy-Original-Path": true,
+	"X-Forwarded-Uri":       true,
+	"X-Original-Uri":        true,
+	"X-Original-Url":        true,
+	"X-Rewrite-Url":         true,
+}
+
+// debugLogSecretQueryParams are the query parameters whose values are credentials, in lower
+// case: the token that the API accepts in place of the Authorization header, the STS credentials
+// that handleSPA accepts, and the parameters of a presigned S3 request, with a signature of
+// version 4 or of version 2. The console reads the fields of the login request, accessKey and
+// secretKey, from the body of the request only; they are here for the client that sends them in
+// the URL by mistake.
+var debugLogSecretQueryParams = map[string]bool{
+	"access_token":         true,
+	"accesskey":            true,
+	"awsaccesskeyid":       true,
+	"secretkey":            true,
+	"signature":            true,
+	"sts":                  true,
+	"sts_a":                true,
+	"sts_s":                true,
+	"x-amz-credential":     true,
+	"x-amz-security-token": true,
+	"x-amz-signature":      true,
+}
+
+// debugLogSharedObjectSegment is the last segment of the route of a shared object's link. What
+// follows it in the path is a presigned URL.
+const debugLogSharedObjectSegment = "download-shared-object"
+
+// debugLogURL returns the URL of a request as the debug log may show it.
+func debugLogURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	return debugLogURLText(u.String())
+}
+
+// debugLogURLText returns the text of a URL without the credentials it may carry: a password,
+// the presigned URL of a shared object and the values of the parameters in
+// debugLogSecretQueryParams.
+//
+// A request line, and a header that repeats it, can be read in two ways: the server ends the
+// path at the first "?" and takes all that follows for the query, while a URL parser ends the
+// path, and also the query, at a "#". Neither reading must show a credential. So the text up to
+// the first "?" is searched for a shared object, and all that follows the first "?" or "#" is
+// searched for parameters. What precedes both is parsed as a URL, to find a password.
+//
+// A text that cannot be parsed or unescaped is not shown at all. It is parsed as it was
+// received, before anything in it is replaced.
+func debugLogURLText(text string) string {
+	path, query := debugLogCut(text, '?')
+	head, fragment := debugLogCut(path, '#')
+	u, err := url.Parse(head)
+	if err != nil {
+		return debugLogRedacted
+	}
+	if _, hasPassword := u.User.Password(); hasPassword {
+		u.User = url.UserPassword(u.User.Username(), debugLogRedacted)
+		head = u.String()
+	}
+	scheme := 0 // the length of the scheme and its colon
+	if u.Scheme != "" {
+		scheme = len(u.Scheme) + len(":")
+	}
+	path, ok := debugLogSharedObject(head+fragment, scheme)
+	if !ok {
+		return debugLogRedacted
+	}
+	head, fragment = debugLogCut(path, '#')
+	return head + debugLogParams(fragment+query)
+}
+
+// debugLogCut returns the text before the first separator, and the rest with the separator.
+func debugLogCut(text string, separator byte) (string, string) {
+	if i := strings.IndexByte(text, separator); i >= 0 {
+		return text[:i], text[i:]
+	}
+	return text, ""
+}
+
+// debugLogSharedObject replaces all that follows a segment named debugLogSharedObjectSegment in
+// the text of a URL, without its query. It reports false when a part of the text cannot be
+// unescaped, wherever that part is.
+//
+// It takes the text for segments between slashes and does not parse it, because one text can be
+// parsed in more than one way: the server reads "//download-shared-object/x" as a path, while a
+// URL parser reads a host and a path. An escaped slash separates segments as a slash does. A
+// segment is compared after unescaping it, in any case. The first segment of a URL without an
+// authority, such as "https:download-shared-object/x", follows the scheme and its colon, whose
+// length the caller gives.
+//
+// It does not ask whether the text holds the route of a shared object: the router cleans a path
+// before it matches a route, and a path that matches no route can still hold a presigned URL
+// that is valid.
+//
+// Anyone can send a request line as long as the server allows, so the work must grow with the
+// length of the text and not faster: what follows a segment is looked at only when the segment
+// has the name, which happens once.
+func debugLogSharedObject(text string, scheme int) (string, bool) {
+	const escapedSlash = "%2F"
+	redacted, found := text, false
+	segments := strings.Split(text, "/")
+	offset := 0 // where the segment begins in the text
+	for i, segment := range segments {
+		// The replacement keeps the length of the segment, so the lengths of the pieces tell
+		// where a piece ends in the segment as it was written.
+		pieces := strings.Split(strings.ReplaceAll(segment, "%2f", escapedSlash), escapedSlash)
+		end := 0
+		for j, piece := range pieces {
+			escaped := piece
+			if i == 0 && j == 0 && scheme <= len(piece) {
+				// A scheme holds nothing that is escaped.
+				escaped = piece[scheme:]
+			}
+			name, err := url.PathUnescape(escaped)
+			if err != nil {
+				return "", false
+			}
+			end += len(piece)
+			if !found && strings.EqualFold(name, debugLogSharedObjectSegment) && debugLogAnyText(pieces[j+1:], segments[i+1:]) {
+				redacted = text[:offset+end] + "/" + debugLogRedacted
+				found = true
+			}
+			end += len(escapedSlash)
+		}
+		offset += len(segment) + len("/")
+	}
+	return redacted, true
+}
+
+// debugLogAnyText reports whether one of the texts is not empty.
+func debugLogAnyText(lists ...[]string) bool {
+	for _, list := range lists {
+		for _, text := range list {
+			if text != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// debugLogParams replaces the value of each parameter in debugLogSecretQueryParams. It splits
+// the text at "&" as url.ParseQuery does.
+func debugLogParams(params string) string {
+	parts := strings.Split(params, "&")
+	for i, part := range parts {
+		parts[i] = debugLogParam(part)
+	}
+	return strings.Join(parts, "&")
+}
+
+// debugLogParam replaces the value of the parameter in one part of a query, if its name is in
+// debugLogSecretQueryParams or cannot be unescaped. The value ends where the part ends.
+//
+// url.ParseQuery takes the text before the first "=" for the name. A name can also begin after
+// a ";", a "?" or a "#" in the part: ParseQuery does not find a parameter there, but the part is
+// logged all the same. So the part is read in pieces between these separators. A piece without
+// a "=" that cannot be unescaped makes every name that holds it one that cannot be unescaped,
+// up to the next "=".
+func debugLogParam(part string) string {
+	malformed := false
+	for start := 0; ; {
+		piece := part[start:]
+		end := strings.IndexAny(piece, ";?#")
+		if end >= 0 {
+			piece = piece[:end]
+		}
+		if key, _, hasValue := strings.Cut(piece, "="); hasValue {
+			if malformed || debugLogSecretName(key) {
+				return part[:start+len(key)] + "=" + debugLogRedacted
+			}
+		} else if _, err := url.QueryUnescape(piece); err != nil {
+			malformed = true
+		}
+		if end < 0 {
+			return part
+		}
+		start += end + 1
+	}
+}
+
+// debugLogSecretName reports whether the escaped name of a parameter is in
+// debugLogSecretQueryParams. A name that cannot be unescaped is taken for one of them.
+func debugLogSecretName(escaped string) bool {
+	name, err := url.QueryUnescape(escaped)
+	return err != nil || debugLogSecretQueryParams[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// debugLogHeaderValue returns the value of a header as the debug log may show it.
+func debugLogHeaderValue(key, value string) string {
+	key = http.CanonicalHeaderKey(key)
+	if debugLogSecretHeaders[key] {
+		return debugLogRedacted
+	}
+	if debugLogURLHeaders[key] {
+		return debugLogURLText(value)
+	}
+	return value
 }
 
 // The middleware configuration happens before anything, this middleware also applies to serving the swagger.json document.
