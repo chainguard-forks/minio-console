@@ -19,6 +19,11 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"math"
@@ -33,12 +38,15 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/go-openapi/errors"
 	"github.com/go-openapi/loads"
 	"github.com/minio/console/api/operations"
 	"github.com/minio/console/pkg/auth"
+	xjwt "github.com/minio/console/pkg/auth/token"
 	"github.com/minio/console/pkg/logger"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 func Test_parseSubPath(t *testing.T) {
@@ -944,8 +952,9 @@ func Test_debugLog_server(t *testing.T) {
 				handler.ServeHTTP(w, tt.request())
 				assert.Equal(t, tt.status, w.Code, tt.name)
 			}
-			// The API read the token from the query: it reports that it could not validate it.
-			assert.Contains(t, strings.Join(apiLog, "\n"), "access-token-claims")
+			// The API read the token from the query: it reports that it could not validate it,
+			// and does not show it. No other request of the table carries a token that fails.
+			assert.Equal(t, []string{keyAuthNotJSON}, apiLog)
 
 			assert.Len(t, logged, len(tests))
 			text := strings.Join(logged, "\n")
@@ -1014,5 +1023,231 @@ func Test_debugLog_websocket(t *testing.T) {
 		}
 	case <-time.After(time.Until(deadline)):
 		t.Fatal("the debug log did not record the request")
+	}
+}
+
+// What KeyAuth logs for a token that it cannot validate.
+const (
+	keyAuthNotJSON   = "Unable to validate the session token: it is not valid JSON"
+	keyAuthOtherForm = "Unable to validate the session token: its JSON does not have the form of a session's claims"
+)
+
+// newLoggedAPI returns the API and its handler, as the server configures them, and the messages
+// that the API logs.
+func newLoggedAPI(t *testing.T) (*operations.ConsoleAPI, http.Handler, *[]string) {
+	spec, err := loads.Embedded(SwaggerJSON, FlatSwaggerJSON)
+	assert.NoError(t, err)
+	consoleAPI := operations.NewConsoleAPI(spec)
+	logged := &[]string{}
+	consoleAPI.Logger = func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}
+	return consoleAPI, configureAPI(consoleAPI), logged
+}
+
+// KeyAuth logs that it could not validate a token, and answers 401. The message must hold
+// nothing of the token: not the token, and not the text of the decoding error, which can quote
+// from it. A JSON syntax error can name the character that it did not expect, as it does for
+// the first token here. The whole message is compared, so that no part of a token can be in it.
+func Test_KeyAuth_invalidToken(t *testing.T) {
+	const claims = `{"stsAccessKeyID":"sts-access-key","stsSecretAccessKey":"sts-secret-key","stsSessionToken":"sts-session-token"`
+	tests := []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{
+			name:  "Text that is not JSON",
+			token: "opaque-bearer-token",
+			want:  keyAuthNotJSON,
+		},
+		{
+			name:  "Claims that are cut short",
+			token: claims,
+			want:  keyAuthNotJSON,
+		},
+		{
+			name:  "Claims followed by other text",
+			token: claims + "}sts-secret-key",
+			want:  keyAuthNotJSON,
+		},
+		{
+			name:  "Claim of another type",
+			token: claims + `,"hm":"yes"}`,
+			want:  keyAuthOtherForm,
+		},
+		{
+			name:  "JSON that is not an object",
+			token: `["sts-secret-key"]`,
+			want:  keyAuthOtherForm,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			consoleAPI, _, logged := newLoggedAPI(t)
+			principal, err := consoleAPI.KeyAuth(tt.token, nil)
+			assert.Nil(t, principal)
+			var apiErr errors.Error
+			if assert.ErrorAs(t, err, &apiErr) {
+				assert.Equal(t, int32(http.StatusUnauthorized), apiErr.Code())
+			}
+			assert.Equal(t, []string{tt.want}, *logged)
+		})
+	}
+}
+
+// sessionTokenProblem chooses its text by the type of the error, also when another error wraps
+// the decoding error, and it has a text for any other error. The text of the error is in none
+// of them.
+func Test_sessionTokenProblem(t *testing.T) {
+	const token = "opaque-bearer-token"
+	_, syntaxErr := auth.ParseClaimsFromToken(token)
+	_, typeErr := auth.ParseClaimsFromToken(`{"hm":"` + token + `"}`)
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "Syntax error",
+			err:  syntaxErr,
+			want: "it is not valid JSON",
+		},
+		{
+			name: "Type error",
+			err:  typeErr,
+			want: "its JSON does not have the form of a session's claims",
+		},
+		{
+			name: "Error that wraps a syntax error",
+			err:  fmt.Errorf("claims of %s: %w", token, syntaxErr),
+			want: "it is not valid JSON",
+		},
+		{
+			name: "Any other error",
+			err:  fmt.Errorf("no claims in %s", token),
+			want: "it could not be decoded",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if assert.Error(t, tt.err) {
+				assert.Equal(t, tt.want, sessionTokenProblem(tt.err))
+			}
+		})
+	}
+}
+
+// sessionCookieOf returns a session cookie that holds the given text in place of the claims of a
+// session. The console has no function that makes one, because it encrypts claims only. So the
+// text is encrypted here as encrypt in pkg/auth does it with AES-GCM, and the test fails unless
+// the console decrypts the cookie to that text. The IV and the nonce are zeros: nothing here
+// depends on them.
+func sessionCookieOf(t *testing.T, text string) string {
+	key := pbkdf2.Key([]byte(xjwt.GetPBKDFPassphrase()), []byte(xjwt.GetPBKDFSalt()), 4096, 32, sha1.New)
+	iv := make([]byte, 16)
+	mac := hmac.New(sha256.New, key)
+	mac.Write(iv)
+	block, err := aes.NewCipher(mac.Sum(nil))
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	aead, err := cipher.NewGCM(block)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	nonce := make([]byte, aead.NonceSize())
+	// The identifier of AES-GCM, the IV, the nonce and the sealed text.
+	ciphertext := append([]byte{0x00}, iv...)
+	ciphertext = append(ciphertext, nonce...)
+	ciphertext = aead.Seal(ciphertext, nonce, []byte(text), []byte{})
+	cookie := base64.StdEncoding.EncodeToString(ciphertext)
+
+	decrypted, err := auth.DecryptToken(cookie)
+	assert.NoError(t, err)
+	assert.Equal(t, text, string(decrypted))
+	return cookie
+}
+
+// The values that reach KeyAuth and fail there, sent through all the middleware and the router
+// of the API, as the server sets them up. The API takes the token from the first Authorization
+// header of the request when that begins with "Bearer ", else from the access_token parameter
+// of the query, else from that of a form. AuthenticationMiddleware adds its own Authorization
+// header after those of the client: "Bearer Anonymous", or the decrypted session cookie. So the
+// token that fails is a value that the client sent, or the text of a session cookie that is not
+// the claims of a session.
+func Test_KeyAuth_invalidToken_server(t *testing.T) {
+	const secret = "client-sent-secret"
+	creds := &credentials.Value{
+		AccessKeyID:     "sts-access-key",
+		SecretAccessKey: "sts-secret-key",
+		SessionToken:    "sts-session-token",
+	}
+	session, err := auth.NewEncryptedTokenForClient(creds, "account-access-key", nil)
+	assert.NoError(t, err)
+	const otherClaims = `{"stsAccessKeyID":"sts-access-key","stsSecretAccessKey":"sts-secret-key","hm":"yes"}`
+	otherSession := sessionCookieOf(t, otherClaims)
+
+	tests := []struct {
+		name    string
+		request func() *http.Request
+		want    string
+	}{
+		{
+			name: "Authorization header of the client",
+			request: func() *http.Request {
+				r := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+				r.Header.Set("Authorization", "Bearer "+secret)
+				return r
+			},
+			want: keyAuthNotJSON,
+		},
+		{
+			name: "Authorization header of the client next to a session cookie",
+			request: func() *http.Request {
+				r := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+				r.Header.Set("Authorization", "Bearer "+secret)
+				r.AddCookie(&http.Cookie{Name: "token", Value: session})
+				return r
+			},
+			want: keyAuthNotJSON,
+		},
+		{
+			name: "Token in the query next to an Authorization header that is not a Bearer one",
+			request: func() *http.Request {
+				r := httptest.NewRequest(http.MethodGet, "/api/v1/session?access_token="+secret, nil)
+				r.Header.Set("Authorization", "Basic basic-credentials")
+				return r
+			},
+			want: keyAuthNotJSON,
+		},
+		{
+			name: "Token in a form next to an Authorization header that is not a Bearer one",
+			request: func() *http.Request {
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/buckets", strings.NewReader("access_token="+secret))
+				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				r.Header.Set("Authorization", "Basic basic-credentials")
+				return r
+			},
+			want: keyAuthNotJSON,
+		},
+		{
+			name: "Session cookie whose text is not the claims of a session",
+			request: func() *http.Request {
+				r := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+				r.AddCookie(&http.Cookie{Name: "token", Value: otherSession})
+				return r
+			},
+			want: keyAuthOtherForm,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, handler, logged := newLoggedAPI(t)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, tt.request())
+			assert.Equal(t, http.StatusUnauthorized, w.Code)
+			assert.Equal(t, []string{tt.want}, *logged)
+		})
 	}
 }
