@@ -22,6 +22,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -93,7 +95,8 @@ func configureAPI(api *operations.ConsoleAPI) http.Handler {
 		}
 		claims, err := auth.ParseClaimsFromToken(token)
 		if err != nil {
-			api.Logger("Unable to validate the session token %s: %v", token, err)
+			// Neither the token nor the text of the error is logged: see sessionTokenProblem.
+			api.Logger("Unable to validate the session token: %s", sessionTokenProblem(err))
 			return nil, errors.New(401, "incorrect api key auth")
 		}
 		return &models.Principal{
@@ -130,6 +133,23 @@ func configureAPI(api *operations.ConsoleAPI) http.Handler {
 	api.ServerShutdown = func() {}
 
 	return setupGlobalMiddleware(api.Serve(setupMiddlewares))
+}
+
+// sessionTokenProblem says, for the log, why KeyAuth could not validate a token. The token can
+// hold a credential, and the text of the error can quote from the token: a JSON syntax error
+// can name the character that it did not expect. So the log gets one of the texts below, chosen
+// by the type of the error, and nothing of the token or of the text of the error.
+func sessionTokenProblem(err error) string {
+	var syntaxError *json.SyntaxError
+	var typeError *json.UnmarshalTypeError
+	switch {
+	case stderrors.As(err, &syntaxError):
+		return "it is not valid JSON"
+	case stderrors.As(err, &typeError):
+		return "its JSON does not have the form of a session's claims"
+	default:
+		return "it could not be decoded"
+	}
 }
 
 // The TLS configuration before HTTPS server starts.
