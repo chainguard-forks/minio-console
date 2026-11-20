@@ -41,6 +41,15 @@ func StartServer(ctx *cli.Context) error {
 		api.LogError("Unable to load certs: %v", err)
 	}
 
+	// The logger takes a clone of the transport for each of its webhooks, and a
+	// clone keeps the TLS configuration it was taken with. So the setting and
+	// the CA certificates loaded above go on the transport before the logger
+	// is initialized.
+	if err := api.ConfigureGlobalTransportTLS(); err != nil {
+		api.LogError("Unable to configure TLS for the calls of console: %v", err)
+		return err
+	}
+
 	xctx := context.Background()
 
 	transport := api.PrepareSTSClientTransport(api.LocalAddress).Transport.(*http.Transport)

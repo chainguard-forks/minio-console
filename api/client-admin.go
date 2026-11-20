@@ -115,9 +115,10 @@ func isLocalIPAddress(ipAddr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// GetConsoleHTTPClient caches different http clients depending on the target endpoint while taking
-// in consideration CA certs stored in ${HOME}/.console/certs/CAs and ${HOME}/.minio/certs/CAs
-// If the target endpoint points to a loopback device, skip the TLS verification.
+// GetConsoleHTTPClient returns a new http.Client that sends its requests through GlobalTransport
+// and adds a clientIP that is not empty to them as X-Forwarded-For. It verifies the certificate of
+// the server exactly when GlobalTransport does: see ConfigureGlobalTransportTLS. The target
+// endpoint plays no part in that, and a loopback device is treated like any other.
 func GetConsoleHTTPClient(clientIP string) *http.Client {
 	return PrepareConsoleHTTPClient(clientIP)
 }

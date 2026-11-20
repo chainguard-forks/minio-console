@@ -19,8 +19,10 @@ package api
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -77,9 +79,14 @@ var (
 			// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
 			// Can't use TLSv1.1 because of RC4 cipher usage
 			MinVersion: tls.VersionTLS12,
-			// Console runs in the same pod/node as MinIO this is acceptable.
-			InsecureSkipVerify: true,
-			RootCAs:            GlobalRootCAs,
+			// Any certificate is accepted when CONSOLE_OUTBOUND_TLS_VERIFY
+			// is "off", which is its default: upstream's reason was that
+			// Console runs in the same pod/node as MinIO. The setting is
+			// read here when the package is initialized, and again by
+			// ConfigureGlobalTransportTLS.
+			InsecureSkipVerify: outboundTLSSkipVerify(),
+			// GlobalRootCAs is not loaded yet when this value is built.
+			// ConfigureGlobalTransportTLS sets RootCAs once it is.
 		},
 	}
 )
@@ -116,6 +123,44 @@ func getMinIOEndpointIsSecure() bool {
 		panic(err)
 	}
 	return u.Scheme == "https"
+}
+
+// lookupOutboundTLSVerify reads CONSOLE_OUTBOUND_TLS_VERIFY from the
+// environment of the process. The value is "on" or "off", in upper or lower
+// case, and white space around it is ignored. A variable that is not set, is
+// empty or holds nothing but white space counts as "off". Every other value
+// is an error, so that a mistyped "on" does not leave verification off
+// without anybody noticing.
+//
+// The value is read with os.Getenv, and not with env.Get as every other
+// setting of this file is: env.Get does not always return the value that the
+// variable holds. For "environment" it returns the default, "off" here, when
+// the environment has no variable _CONSOLE_OUTBOUND_TLS_VERIFY, so that this
+// mistyped value would count as "off" without an error.
+//
+// The error does not repeat the value, which is not known to be harmless to
+// log: in the form that env.Get knows, it can hold a user name and a key.
+func lookupOutboundTLSVerify() (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(ConsoleOutboundTLSVerify))) {
+	case "on":
+		return true, nil
+	case "off", "":
+		return false, nil
+	default:
+		return false, fmt.Errorf("the value of %s is neither \"on\" nor \"off\"", ConsoleOutboundTLSVerify)
+	}
+}
+
+// outboundTLSSkipVerify returns what the initializer of GlobalTransport gives
+// to InsecureSkipVerify. It is true when CONSOLE_OUTBOUND_TLS_VERIFY is "off"
+// at the time of the call, as it is by default. It is false when the setting
+// is "on", and false as well when lookupOutboundTLSVerify refuses the value:
+// a program that never calls ConfigureGlobalTransportTLS sees no error for
+// such a value, and it gets a transport that verifies rather than one that
+// silently does not.
+func outboundTLSSkipVerify() bool {
+	verify, err := lookupOutboundTLSVerify()
+	return err == nil && !verify
 }
 
 // GetHostname gets console hostname set on env variable,

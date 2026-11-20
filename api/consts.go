@@ -25,6 +25,9 @@ const (
 	ConsolePort        = "CONSOLE_PORT"
 	ConsoleTLSPort     = "CONSOLE_TLS_PORT"
 
+	// Constant for the TLS verification of the calls that use GlobalTransport
+	ConsoleOutboundTLSVerify = "CONSOLE_OUTBOUND_TLS_VERIFY"
+
 	// Constants for Secure middleware
 	ConsoleSecureAllowedHosts                    = "CONSOLE_SECURE_ALLOWED_HOSTS"
 	ConsoleSecureAllowedHostsAreRegex            = "CONSOLE_SECURE_ALLOWED_HOSTS_ARE_REGEX"

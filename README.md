@@ -184,14 +184,55 @@ Following tree structure is expected for supporting multiple domains:
 
 ## Connect Console to a Minio using TLS and a self-signed certificate
 
-Copy the MinIO `ca.crt` under `~/.console/certs/CAs`, then:
-
 ```sh
 export CONSOLE_MINIO_SERVER=https://localhost:9000
 ./console server
 ```
 
 You can verify that the apis work by doing the request on `localhost:9090/api/v1/...`
+
+With `CONSOLE_OUTBOUND_TLS_VERIFY` not set, or set to `off`, `console server` does not verify the TLS certificate
+of MinIO, nor the one of a log or audit webhook (`CONSOLE_LOGGER_WEBHOOK_ENDPOINT`,
+`CONSOLE_AUDIT_WEBHOOK_ENDPOINT`). It accepts any certificate from them: whoever signed it, whichever host it names,
+expired or not. A certificate under `~/.console/certs/CAs` then changes nothing in these calls.
+
+### Verify the certificate of MinIO and of the webhooks
+
+Set `CONSOLE_OUTBOUND_TLS_VERIFY` to `on`, and copy under `~/.console/certs/CAs` the certificate of the certificate
+authority that signed the certificate of MinIO. When the certificate of MinIO is self-signed, copy that certificate
+itself.
+
+```sh
+export CONSOLE_OUTBOUND_TLS_VERIFY=on
+export CONSOLE_MINIO_SERVER=https://localhost:9000
+./console server
+```
+
+With the setting `on`, `console server` refuses the certificate of MinIO, and the one of an enabled log or audit
+webhook, unless all of this holds:
+
+ - `console server` trusts the certificate itself, or a certificate that it trusts has signed it, directly or
+   through intermediate certificates;
+ - it names the host of the URL that `console server` calls, here `localhost`;
+ - it has not expired.
+
+`console server` trusts the certificates of the certificate authorities of the system, and the certificates that it
+finds in these places when it starts:
+
+ - the files of the `CAs` directory: `~/.console/certs/CAs`, or `<dir>/CAs` with `--certs-dir <dir>`;
+ - the files of `/var/run/secrets/kubernetes.io/serviceaccount`, except on Windows;
+ - its own certificate: `public.crt` in `~/.console/certs` or in `<dir>`, when `private.key` is there too;
+ - the file given with `--tls-ca`.
+
+If `console server` logs `Unable to load certs` when it starts, it may have left out some or all of these places.
+
+When `console server` refuses the certificate of MinIO, it answers a login with an access key and a secret key with
+`invalid login`, and it logs the reason, for example `x509: certificate signed by unknown authority`.
+
+The value of the variable is `on` or `off`. The case of its letters does not matter, and white space around it is
+ignored. A variable that is not set, is empty or holds only white space means `off`. `console server` does not start
+with any other value. With the setting `on`, it does not start either when it refuses the certificate of an enabled
+log or audit webhook.
 
 ## Debug logging
 
