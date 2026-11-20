@@ -17,6 +17,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"net/http"
 )
 
@@ -41,11 +42,48 @@ func PrepareSTSClientTransport(clientIP string) *ConsoleTransport {
 	}
 }
 
-// PrepareConsoleHTTPClient returns an http.Client with custom configurations need it by *credentials.STSAssumeRole
-// custom configurations include the use of CA certificates
+// PrepareConsoleHTTPClient returns an http.Client that sends its requests through GlobalTransport,
+// as *credentials.STSAssumeRole needs it. Whether the certificate of the server is verified, and
+// with which CA certificates, is the configuration of GlobalTransport: see ConfigureGlobalTransportTLS.
 func PrepareConsoleHTTPClient(clientIP string) *http.Client {
 	// Return http client with default configuration
 	return &http.Client{
 		Transport: PrepareSTSClientTransport(clientIP),
 	}
+}
+
+// ConfigureGlobalTransportTLS puts CONSOLE_OUTBOUND_TLS_VERIFY and the CA
+// certificates of GlobalRootCAs on GlobalTransport.
+//
+// With the setting off, which is the default, GlobalTransport accepts any
+// certificate and the CA certificates play no part. With the setting on,
+// GlobalTransport verifies the certificate of the server against the CA
+// certificates of GlobalRootCAs; a nil GlobalRootCAs stands for the CA
+// certificates of the system.
+//
+// GlobalTransport is built before GlobalRootCAs is loaded, so the code that
+// loads the CA certificates calls this afterwards, and before anything uses
+// or clones GlobalTransport: a clone keeps the TLS configuration it was taken
+// with.
+//
+// When lookupOutboundTLSVerify refuses the value of the setting,
+// ConfigureGlobalTransportTLS returns its error and changes nothing.
+func ConfigureGlobalTransportTLS() error {
+	verify, err := lookupOutboundTLSVerify()
+	if err != nil {
+		return err
+	}
+	// A tls.Config must not be modified after a connection has used it, so
+	// the transport gets a copy with the two values set.
+	tlsConfig := GlobalTransport.TLSClientConfig.Clone()
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	tlsConfig.InsecureSkipVerify = !verify
+	tlsConfig.RootCAs = GlobalRootCAs
+	GlobalTransport.TLSClientConfig = tlsConfig
+	// The idle connections were opened with the earlier configuration. They
+	// are closed, so that no later request goes over one of them.
+	GlobalTransport.CloseIdleConnections()
+	return nil
 }
